@@ -9,6 +9,8 @@ pub mod types;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_supervise;
 
 pub use apply::apply;
 pub use error::{Error, Result};

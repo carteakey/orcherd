@@ -23,6 +23,9 @@ use crate::types::{
     TemplateKind, VerdictKind,
 };
 
+mod supervise;
+use supervise::{exec_freeze, exec_seat_brief, exec_task_reopen, refuse_if_frozen};
+
 struct OpOutcome {
     team_id: String,
     ref_id: Option<String>,
@@ -306,6 +309,8 @@ fn exec_team_op(conn: &Connection, team_id: &str, actor: &Actor, now: &str, op: 
         Op::AuditLog { limit } => Ok(OpOutcome::simple(team_id, None, ReceiptData::Audit(list_audit(conn, team_id, limit)?))),
         Op::Freeze { reason } => exec_freeze(conn, team_id, actor, now, Some(&reason)),
         Op::Unfreeze => exec_freeze(conn, team_id, actor, now, None),
+        Op::SeatBrief { seat, brief } => exec_seat_brief(conn, team_id, actor, now, &seat, &brief),
+        Op::TaskReopen { task, spec } => exec_task_reopen(conn, team_id, actor, now, &task, &spec),
         Op::DaemonRecordDoorbell { seat, rung_through_seq, outcome } => exec_daemon_record_doorbell(conn, team_id, now, &seat, rung_through_seq, outcome),
         Op::DaemonEscalate { seat, dispatch_id, stop_reason, detail } => exec_daemon_escalate(conn, team_id, now, &seat, dispatch_id.as_deref(), &stop_reason, &detail),
     }
@@ -386,6 +391,11 @@ fn exec_spawn_prepare(conn: &Connection, team_id: &str, actor: &Actor, now: &str
     } else {
         None
     };
+
+    // A fresh terminal starts with no memory, so it gets its standing brief again first.
+    if !warm_reuse && let Some(brief) = seat_record.standing_brief.as_deref().filter(|b| !b.trim().is_empty()) {
+        write_inbox(conn, team_id, &seat_record.name, actor.actor_name(), InboxKind::Notice, &seat_record.seat_id, "Your standing brief", brief, now)?;
+    }
 
     let dispatch_record = if let Some(task) = &task_record {
         let inherited_failures = prev_dispatch.as_ref().map_or(0, |d| d.failure_count);
@@ -731,7 +741,13 @@ fn exec_verdict(conn: &Connection, team_id: &str, actor: &Actor, now: &str, task
             } else {
                 conn.execute("UPDATE tasks SET status = 'in_progress', review_round = ?1, updated_at = ?2 WHERE task_id = ?3", params![new_round, now, task.task_id])?;
                 let recipient = task.assignee_seat.as_deref().unwrap_or(supervisor.as_str());
-                write_inbox(conn, team_id, recipient, actor.actor_name(), InboxKind::Verdict, &task.task_id, &format!("Verdict FIX (round {new_round}): {}", task.title), body, now)?;
+                let subject = format!("Verdict FIX (round {new_round}): {}", task.title);
+                write_inbox(conn, team_id, recipient, actor.actor_name(), InboxKind::Verdict, &task.task_id, &subject, body, now)?;
+                // The supervisor hears every verdict, not only PASS, so a FIX can be recorded
+                // before the assignee comes back with the fixes.
+                if recipient != supervisor && actor.actor_name() != supervisor {
+                    write_inbox(conn, team_id, &supervisor, actor.actor_name(), InboxKind::Verdict, &task.task_id, &format!("{subject} (sent to {recipient})"), body, now)?;
+                }
             }
         }
         VerdictKind::Escalate => {
@@ -909,65 +925,4 @@ fn exec_daemon_escalate(conn: &Connection, team_id: &str, now: &str, seat_ref: &
 
     write_inbox(conn, team_id, &supervisor, &seat.name, InboxKind::Escalation, &seat.seat_id, &format!("Seat '{}' escalated ({stop_reason})", seat.name), detail, now)?;
     Ok(OpOutcome::simple(team_id, Some(seat.seat_id.clone()), ReceiptData::Seat(Box::new(seat))))
-}
-
-/// While a team is frozen, nothing may start new work: no spawns, claims, or assignments.
-/// Reads, `ask`, `reply`, `done`, and `verdict` still work so seats can report and wind down.
-fn refuse_if_frozen(conn: &Connection, team_id: &str, op: &Op) -> Result<()> {
-    let starts_work = matches!(op, Op::SpawnPrepare { .. } | Op::TaskClaim { .. } | Op::TaskAssign { .. })
-        || matches!(op, Op::TaskCreate { assign: Some(_), .. });
-    if !starts_work {
-        return Ok(());
-    }
-    let frozen: Option<(String, Option<String>)> = conn
-        .query_row(
-            "SELECT paused_at, paused_reason FROM teams WHERE team_id = ?1 AND paused_at IS NOT NULL",
-            params![team_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    match frozen {
-        Some((at, reason)) => Err(Error::validation(format!(
-            "team is frozen since {at}: {}. No new work starts until the supervisor runs `orcherd unfreeze`",
-            reason.as_deref().unwrap_or("no reason given")
-        ))),
-        None => Ok(()),
-    }
-}
-
-/// `Freeze` (with a reason) or `Unfreeze` (`reason: None`). Supervisor or human only.
-/// Every other seat gets a notice; the daemon holds doorbells while the team is frozen.
-fn exec_freeze(conn: &Connection, team_id: &str, actor: &Actor, now: &str, reason: Option<&str>) -> Result<OpOutcome> {
-    let verb = if reason.is_some() { "freeze" } else { "unfreeze" };
-    if let Actor::Seat { seat_name, .. } = actor {
-        let seat = resolve_seat(conn, team_id, seat_name)?;
-        if seat.role != SeatRole::Supervisor {
-            return Err(Error::PermissionDenied(format!("only the supervisor or a human may {verb} the team")));
-        }
-    }
-    let reason = match reason {
-        Some(r) if r.trim().is_empty() => return Err(Error::validation("`freeze` needs a reason")),
-        Some(r) => Some(r.trim()),
-        None => None,
-    };
-    let paused_at = reason.map(|_| now);
-    conn.execute(
-        "UPDATE teams SET paused_at = ?1, paused_reason = ?2, updated_at = ?3 WHERE team_id = ?4",
-        params![paused_at, reason, now, team_id],
-    )?;
-    let (subject, body) = match reason {
-        Some(r) => ("Team frozen: stop and start nothing new".to_string(), format!("{r}\n\nFinish or abandon the current step, then end your turn. New spawns, claims, and assignments are refused until the supervisor runs `orcherd unfreeze`.")),
-        None => ("Team unfrozen: work can resume".to_string(), "The freeze is lifted. Check `orcherd inbox` and continue your task.".to_string()),
-    };
-    for seat in list_seats(conn, team_id, true)? {
-        if seat.name != actor.actor_name() {
-            write_inbox(conn, team_id, &seat.name, actor.actor_name(), InboxKind::Notice, team_id, &subject, &body, now)?;
-        }
-    }
-    Ok(OpOutcome {
-        team_id: team_id.to_string(),
-        ref_id: Some(team_id.to_string()),
-        next: Some(if reason.is_some() { "orcherd unfreeze" } else { "orcherd status" }.to_string()),
-        data: ReceiptData::TeamStatus(Box::new(build_team_projection(conn, team_id)?)),
-    })
 }

@@ -140,6 +140,10 @@ pub fn handle_seat(args: &[String], global: &GlobalFlags) -> Result<i32, String>
             let to_seat = to_seat.ok_or_else(|| "`seat handoff` requires `--to <seat>`".to_owned())?;
             execute_op(Op::SeatHandoff { to_seat }, global)
         }
+        "brief" => {
+            let (seat, brief) = target_and_text(rest, "seat brief <seat>", "--brief")?;
+            execute_op(Op::SeatBrief { seat, brief }, global)
+        }
         other => Err(format!("unknown `seat` subcommand `{other}`")),
     }
 }
@@ -409,6 +413,10 @@ pub fn handle_task(args: &[String], global: &GlobalFlags) -> Result<i32, String>
             let task_id = task_id.ok_or_else(|| "`task update` requires `<task_id>`".to_owned())?;
             let status = status.ok_or_else(|| "`task update` requires `--status <status>`".to_owned())?;
             execute_op(Op::TaskUpdate { task_id, status }, global)
+        }
+        "reopen" => {
+            let (task, spec) = target_and_text(rest, "task reopen <task_id>", "--spec")?;
+            execute_op(Op::TaskReopen { task, spec }, global)
         }
         other => Err(format!("unknown `task` subcommand `{other}`")),
     }
@@ -872,4 +880,29 @@ pub fn handle_log(args: &[String], global: &GlobalFlags) -> Result<i32, String> 
         i += 1;
     }
     execute_op(Op::AuditLog { limit }, global)
+}
+
+/// Parses `<target> (--<flag>-file <path> | --<flag> <text>)`, as `seat brief` and `task reopen` take.
+fn target_and_text(args: &[String], usage: &str, flag: &str) -> Result<(String, String), String> {
+    let file_flag = format!("{flag}-file");
+    let (mut target, mut inline, mut file) = (None, None, None);
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            f if f == file_flag => {
+                i += 1;
+                file = Some(PathBuf::from(req_val(args, i, &file_flag)?));
+            }
+            f if f == flag => {
+                i += 1;
+                inline = Some(req_val(args, i, flag)?.to_owned());
+            }
+            val if !val.starts_with('-') && target.is_none() => target = Some(val.to_owned()),
+            other => return Err(format!("unknown `{usage}` option `{other}`")),
+        }
+        i += 1;
+    }
+    let target = target.ok_or_else(|| format!("`{usage}` needs its target"))?;
+    let text = read_required_file_or_inline(file.as_deref(), inline, &file_flag)?;
+    Ok((target, text))
 }

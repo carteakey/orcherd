@@ -164,8 +164,8 @@ Every command takes `--json`, `--team`, `--as <seat>`, and `--request-id` (safe 
 | | |
 | --- | --- |
 | `init`, `status`, `log` | Create a team; show the board; show the audit trail |
-| `spawn`, `seat …` | Start or reuse a seat; list, read, stop, release, rebind, remove, hand off |
-| `task …` | `create` (`--deps`, `--reviewer`, `--assign`), `list`, `show`, `assign`, `claim`, `update` |
+| `spawn`, `seat …` | Start or reuse a seat; list, read, stop, release, rebind, remove, hand off, set its standing brief |
+| `task …` | `create` (`--deps`, `--reviewer`, `--assign`), `list`, `show`, `assign`, `claim`, `update`, `reopen` (another round, same count) |
 | `inbox`, `send` | Read your items (`--peek` to leave them unread); message a seat or `@all`/`@idle`/`@workers`/`@reviewers` |
 | `ask`, `reply`, `gate list` | Block on a decision; answer it; list open decisions |
 | `done`, `verdict` | Hand in a task; review it (`pass`, `fix`, `escalate`) |

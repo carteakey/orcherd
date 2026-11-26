@@ -112,6 +112,7 @@ To avoid both Herding v1's brittle pane bindings and Orca's hourly OAuth sign-ou
      - `env`: `ORCHERD_CLI_COMMAND`, `ORCHERD_TEAM`, `ORCHERD_SEAT`, `ORCHERD_DISPATCH`, `ORCHERD_MACHINE` (if remote), `ORCHERD_REMOTE_SOCKET` (if remote)
      - `labels`: `orcherd.team`, `orcherd.seat`, `orcherd.role`, `orcherd.dispatch`
      and waits for `agent::ready` before sending the initial doorbell.
+   - **Receipt after binding**: `spawn` prints its receipt only after the terminal is bound, with the seat re-read from the store, so `address` is the new terminal (never a pre-bind `none`). If the run or the bind fails, the receipt names the `failed_stage` and the command exits 1.
    - **Warm Seat Reuse**: If the seat already has a live `herdr-core` terminal running the matching agent (`reply::agent_in_front`), `orcherd` does **not** spawn a new OS process. It updates `dispatches` and writes the new task brief to `inbox`; `orcherd daemon` rings the warm terminal as soon as its status is `idle`.
    - **Reboot / Crash Resume (`--resume`)**: Relaunches the seat's harness with its saved `resume_session` (`claude --resume <id>`, `zcode --resume <id>`, `agy --conversation=<id>`) in its existing `worktree_path` and updates `address_terminal`.
 
@@ -130,7 +131,9 @@ To avoid both Herding v1's brittle pane bindings and Orca's hourly OAuth sign-ou
   - Marks the gate `resolved`, restores the blocked task to `in_progress`, writes `gate_resolved` to the worker's `inbox`, and wakes the worker.
 - **`orcherd verdict <task_id> --verdict pass|fix|escalate --body-file <path>`**:
   - `pass`: Marks the task review-approved (`completed` or ready for supervisor fast-forward), unblocks dependent DAG tasks, and wakes the Supervisor.
-  - `fix`: Increments `tasks.review_round`, transitions the task back to `in_progress`, and wakes `assignee_seat` with the numbered fix round. If `review_round >= 3`, auto-escalates to `supervisor`.
+  - `fix`: Increments `tasks.review_round`, transitions the task back to `in_progress`, and wakes `assignee_seat` with the numbered fix round; the Supervisor gets a copy (`… (sent to <seat>)`). If `review_round >= 3`, auto-escalates to `supervisor`.
+- **`orcherd task reopen <task_id> --spec-file <path>`** (supervisor or human): moves a `completed`, `failed` or `cancelled` task back to `assigned` with the new spec and sends it to the same assignee. `review_round` is kept, so the three-FIX escalation counts across follow-up rounds. Refused while the team is frozen.
+- **`orcherd seat brief <seat> --brief-file <path>`** (supervisor or human): sets `seats.standing_brief` and sends it to the seat as a `notice`. `spawn` sends it again whenever the seat starts in a fresh terminal (not on warm reuse).
   - `escalate`: Marks the task `blocked`, creates an `escalation` gate for the Supervisor/human owner, and rings the Supervisor.
 
 ---
@@ -466,6 +469,7 @@ Seats & Dispatches:
   orcherd seat rebind <seat> [--terminal <hc_terminal>] [--json]
   orcherd seat remove <seat> [--json]          # creates pending human approval gate
   orcherd seat handoff --to <seat> [--json]    # creates pending human approval gate
+  orcherd seat brief <seat> --brief-file <path> [--json]
 
 Task Board & DAGs:
   orcherd task create --spec-file <path> [--title <text>] [--deps <id,id>]
@@ -475,6 +479,7 @@ Task Board & DAGs:
   orcherd task assign <task_id> --to <seat> [--reviewer <seat>] [--spec-file <path>] [--json]
   orcherd task claim <task_id> [--json]
   orcherd task update <task_id> --status <status> [--json]
+  orcherd task reopen <task_id> --spec-file <path> [--json]
 
 Turn Outcomes & Gates:
   orcherd inbox [--peek] [--seat <seat>] [--limit <n>] [--json]

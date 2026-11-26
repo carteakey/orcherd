@@ -5,7 +5,7 @@
 Unlike ephemeral subagents that vanish after one task, an Orcherd **Seat** (`--seat <name>`) is a persistent identity and warm terminal on `herdr-core`:
 
 1. **Keeps OAuth and CLI sessions warm**: Harnesses like Antigravity (`agy`), Claude Code, and ZCode hold active credentials and repo caches in memory. Spawning a fresh OS process an hour later can hit expired OAuth refresh tokens (`start_blocked`), whereas sending a new task or follow-up to an already-running warm seat continues smoothly in the same signed-in session.
-2. **Preserves role and review memory**: A seat like `vicesuper` or `gauntlet` retains its standing brief, role constraints, and audit trail across the entire run.
+2. **Preserves role and review memory**: A seat like `vicesuper` or `gauntlet` retains its standing brief, role constraints, and audit trail across the entire run. Set the brief with `ORCHERD seat brief <seat> --brief-file <brief.md>`; it is delivered at once and again on every fresh launch.
 3. **Survives reboots via `--resume`**: Each seat stores its `resume_session` and `worktree_path`. After a machine reboot, `ORCHERD spawn --seat <name> --resume` restarts the harness with `--resume <id>` in its existing worktree and rebinds its `herdr-core` terminal address without losing task assignments or inbox items.
 
 ## Built-in team templates

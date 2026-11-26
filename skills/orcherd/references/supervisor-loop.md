@@ -29,7 +29,7 @@ Pairing one supervisor with cheaper or specialized builders saves tokens only wh
      ```text
      ORCHERD verdict <task_id> --verdict pass|fix|escalate --body-file review.md
      ```
-   - `fix` sends numbered fix notes directly back to the worker seat and increments `review_round`.
+   - `fix` sends numbered fix notes directly back to the worker seat, copies you, and increments `review_round`. Owner-directed rounds after a PASS go through `ORCHERD task reopen <task_id> --spec-file <path>`, which keeps the count.
    - `pass` wakes the supervisor to land or ship.
    - **Negative results count**: When an experiment proves an approach is slower or worse, record the measured numbers in a finding and close the task cleanly.
 3. **Low-risk surfaces** (docs, isolated tests, help text): omit `--reviewer` and verify directly from the worker's structured completion report plus green CI checks.

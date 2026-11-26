@@ -736,7 +736,7 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
         let seat_keep_open = seat.keep_open;
 
         if let Some(term) = explicit_terminal {
-            let _ = store
+            store
                 .apply(
                     &actor,
                     RequestEnvelope::new(Op::SpawnBindAddress {
@@ -816,7 +816,7 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
                                 stop: &stop_flag,
                             };
                             let _ = agent::ready(&core, &terminal.address, until);
-                            let _ = store.apply(
+                            let bound = store.apply(
                                 &actor,
                                 RequestEnvelope::new(Op::SpawnBindAddress {
                                     seat: seat_name_cloned.clone(),
@@ -831,21 +831,14 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
                                 })
                                 .with_team(&team.team_id),
                             );
-                            let _ = daemon::tick_once(&mut store, Some(&core), &mut daemon::RingBackoff::default());
-                            if let Ok(updated) = store.apply(
-                                &actor,
-                                RequestEnvelope::new(Op::SeatShow {
-                                    seat: seat_name_cloned,
-                                })
-                                .with_team(&team.team_id),
-                            ) && let ReceiptData::Seat(updated_seat) = updated.data
-                                && let ReceiptData::SpawnPrepared {
-                                    seat: ref mut r_seat,
-                                    ..
-                                } = receipt.data
-                            {
-                                *r_seat = updated_seat;
+                            if let Err(err) = bound {
+                                receipt.failed_stage = Some("bind_address".to_owned());
+                                receipt.next = Some(format!(
+                                    "terminal {} started but couldn't be recorded ({err}); bind it with `orcherd spawn --seat {seat_name_cloned} --terminal {}`",
+                                    terminal.address, terminal.address
+                                ));
                             }
+                            let _ = daemon::tick_once(&mut store, Some(&core), &mut daemon::RingBackoff::default());
                         }
                         Err(err) => {
                             receipt.failed_stage = Some("terminal_run".to_owned());
@@ -865,8 +858,19 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
         }
     }
 
+    // The receipt is printed only after the terminal is bound, and always carries the seat
+    // as stored now, so scripts never read a pre-bind `address=none`.
+    if let ReceiptData::SpawnPrepared { seat: ref mut r_seat, .. } = receipt.data
+        && let Ok(updated) = store.apply(
+            &actor,
+            RequestEnvelope::new(Op::SeatShow { seat: r_seat.name.clone() }).with_team(&team.team_id),
+        )
+        && let ReceiptData::Seat(updated_seat) = updated.data
+    {
+        *r_seat = updated_seat;
+    }
     outln!("{}", format_receipt(&receipt, global.json));
-    Ok(0)
+    Ok(if receipt.failed_stage.is_some() { 1 } else { 0 })
 }
 
 /// Launch argv for a seat's agent harness.

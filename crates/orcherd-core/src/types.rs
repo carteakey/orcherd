@@ -662,6 +662,10 @@ pub enum Op {
     SeatHandoff {
         to_seat: String,
     },
+    SeatBrief {
+        seat: String,
+        brief: String,
+    },
     TaskCreate {
         title: Option<String>,
         spec: String,
@@ -693,6 +697,10 @@ pub enum Op {
     TaskUpdate {
         task_id: String,
         status: TaskStatus,
+    },
+    TaskReopen {
+        task: String,
+        spec: String,
     },
     InboxRead {
         #[serde(default)]
@@ -790,12 +798,14 @@ impl Op {
             Self::SeatRebind { .. } => "seat_rebind",
             Self::SeatRemove { .. } => "seat_remove",
             Self::SeatHandoff { .. } => "seat_handoff",
+            Self::SeatBrief { .. } => "seat_brief",
             Self::TaskCreate { .. } => "task_create",
             Self::TaskList { .. } => "task_list",
             Self::TaskShow { .. } => "task_show",
             Self::TaskAssign { .. } => "task_assign",
             Self::TaskClaim { .. } => "task_claim",
             Self::TaskUpdate { .. } => "task_update",
+            Self::TaskReopen { .. } => "task_reopen",
             Self::InboxRead { .. } => "inbox_read",
             Self::Send { .. } => "send",
             Self::Ask { .. } => "ask",

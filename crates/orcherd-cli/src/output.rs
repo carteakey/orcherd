@@ -95,6 +95,9 @@ pub fn format_receipt(receipt: &Receipt, json: bool) -> String {
                 seat.address,
                 seat.worktree_path.as_deref().unwrap_or("-")
             ));
+            if let Some(brief) = seat.standing_brief.as_deref() {
+                out.push_str(&format!("Standing brief:\n{brief}\n"));
+            }
         }
         ReceiptData::Seats(seats) => {
             out.push_str(&format!("Seats ({}):\n", seats.len()));
@@ -284,6 +287,7 @@ Usage:
   orcherd seat rebind <seat> [--terminal <hc_terminal>] [--machine <m>] [--json]
   orcherd seat remove <seat> [--json]
   orcherd seat handoff --to <seat> [--json]
+  orcherd seat brief <seat> --brief-file <path> [--json]   (standing role brief; re-sent on every fresh launch)
 ",
         "task" => "\
 orcherd task — Manage the Task Board and DAG dependencies
@@ -295,6 +299,7 @@ Usage:
   orcherd task assign <task_id> --to <seat> [--reviewer <seat>] [--spec-file <path>] [--json]
   orcherd task claim <task_id> [--json]
   orcherd task update <task_id> --status <status> [--json]
+  orcherd task reopen <task_id> --spec-file <path> [--json]   (another round for the same assignee; keeps the review round)
 ",
         "inbox" | "check" => "\
 orcherd inbox — Read and mark-read unread assignments, mentions, gate answers, and review requests

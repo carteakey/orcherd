@@ -30,6 +30,9 @@ ORCHERD spawn --seat <seat_name> --agent <agent> --worktree <current|new-child> 
   A working seat receives the doorbell as soon as its current turn ends (`idle`, or `done` for harnesses like agy); a settled seat receives it as a follow-up turn. Don't ring seats yourself with `hc send`.
 - **Shared Bulletin**: Use `ORCHERD bulletin post --to @<seat> --body-file <post.md>` for team-wide context, branch handoffs, and `AUTHORIZED: push` notices that the whole crew should see.
 
+- **Another round on finished work** (an owner note after a PASS): run `ORCHERD task reopen <task_id> --spec-file <followup.md>` instead of creating a new task. The same assignee and reviewer get it, and the task keeps its review round, so the third FIX still escalates.
+- **Standing briefs** (a reviewer's rubric, a builder's house rules): `ORCHERD seat brief <seat> --brief-file <brief.md>`. The seat gets it now and again whenever it starts in a fresh terminal, so don't resend it as a message each round.
+
 - **Emergency stop (supervisor)**: when work must stop now (a destructive command, a wrong target, a bad data write), run `ORCHERD freeze --reason "<why>"`. Every seat is notified, seats mid-turn are interrupted, and new spawns, claims, and assignments are refused until `ORCHERD unfreeze`. Use it instead of a bulletin post, which busy seats read late.
 
 Always:
@@ -46,7 +49,7 @@ Run `ORCHERD inbox` to read and mark-read your pending items:
   - Otherwise, review the structured report and diff (load `references/supervisor-loop.md` for tiered review and `AUTHORIZED: push`).
 - **`verdict`**:
   - `pass`: Fast-forward or ship the verified work, mark the task completed, and dispatch the next ready tasks (`ORCHERD task list --ready`).
-  - `fix`: Orcherd already returned the task to `in_progress` and rung the builder seat with the numbered fix round.
+  - `fix`: Orcherd already returned the task to `in_progress` and rang the builder seat with the numbered fix round; your copy says `(sent to <seat>)`. Record the FIX now, don't wait for the fixes.
   - `escalate`: Three failed review rounds or a hard blocker—surface the options to the user.
 - **`notice` "Team frozen"**: stop. Finish or abandon the current step without starting anything new, report with `ORCHERD done` or `ORCHERD ask` if needed, then **end your turn** and wait for "Team unfrozen".
 - **`escalation` "Seat isn't taking its doorbell"**: the seat had unread items and refused its doorbell for over a minute. Check it with `ORCHERD seat read <seat> --lines 40` (often a dialog, a crashed harness, or a stuck status).
