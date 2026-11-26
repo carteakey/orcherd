@@ -1,13 +1,26 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-  <!-- Shepherd's crook trunk rooted at base -->
-  <path d="M12 21V9.5a3.5 3.5 0 1 1 3.5 3.5H14"/>
-  <!-- Left & right git worktree branches -->
-  <path d="M12 15.5c-2.5 0-4.5-1.5-5.5-3.5"/>
-  <path d="M12 17.5c2.5 0 4.8-1.2 6-3"/>
-  <!-- Orchestrated seat nodes (orchard fruit / terminals) -->
-  <circle cx="5.5" cy="10" r="2"/>
-  <circle cx="19" cy="12.5" r="2"/>
-  <circle cx="8.5" cy="5.5" r="1.75"/>
-  <!-- Base root bar -->
-  <path d="M9 21h6"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Shepherd's crook trunk — supervisor spine -->
+  <path d="M12 22V9a4 4 0 0 1 4-4c2.5 0 4 2 4 4s-1.5 4-4 4h-2"/>
+
+  <!-- Left worktree branch -->
+  <path d="M12 16c-2.2 0-4-1.2-5.5-3.2" stroke-opacity="0.75"/>
+  <!-- Right worktree branch -->
+  <path d="M12 18c2.2 0 4.5-1 5.8-2.8" stroke-opacity="0.75"/>
+  <!-- Upper-left branch -->
+  <path d="M12 12.5c-1.8 0-3.2-1.5-4-3.5" stroke-width="1.4" stroke-opacity="0.6"/>
+
+  <!-- Seat node: Supervisor (hook) -->
+  <circle cx="16" cy="9" r="1.8" fill="currentColor" stroke="none"/>
+  <!-- Seat node: Builder A (left) -->
+  <circle cx="5.5" cy="11" r="2" fill="none" stroke-width="1.6"/>
+  <circle cx="5.5" cy="11" r="0.6" fill="currentColor" stroke="none"/>
+  <!-- Seat node: Builder B (right) -->
+  <circle cx="18.8" cy="13" r="2" fill="none" stroke-width="1.6"/>
+  <circle cx="18.8" cy="13" r="0.6" fill="currentColor" stroke="none"/>
+  <!-- Seat node: Reviewer (upper-left) -->
+  <circle cx="7" cy="7" r="1.6" fill="none" stroke-width="1.4"/>
+  <circle cx="7" cy="7" r="0.5" fill="currentColor" stroke="none"/>
+
+  <!-- Root platform bar -->
+  <path d="M9 22h6" stroke-width="2"/>
 </svg>

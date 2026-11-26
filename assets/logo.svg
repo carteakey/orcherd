@@ -1,61 +1,107 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" fill="none">
   <defs>
+    <!-- Background gradient: deep navy to dark emerald -->
     <linearGradient id="bg" x1="24" y1="16" x2="232" y2="240" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#0F172A"/>
-      <stop offset="55%" stop-color="#111827"/>
-      <stop offset="100%" stop-color="#064E3B"/>
+      <stop offset="0%" stop-color="#0C1222"/>
+      <stop offset="50%" stop-color="#0F172A"/>
+      <stop offset="100%" stop-color="#052E16"/>
     </linearGradient>
-    <linearGradient id="crook" x1="128" y1="48" x2="128" y2="216" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#F59E0B"/>
-      <stop offset="50%" stop-color="#10B981"/>
+
+    <!-- Main crook: warm amber to emerald -->
+    <linearGradient id="crook" x1="128" y1="40" x2="128" y2="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FBBF24"/>
+      <stop offset="35%" stop-color="#F59E0B"/>
+      <stop offset="65%" stop-color="#10B981"/>
       <stop offset="100%" stop-color="#34D399"/>
     </linearGradient>
-    <linearGradient id="nodeA" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#FBBF24"/>
-      <stop offset="100%" stop-color="#F59E0B"/>
+
+    <!-- Branch: faded emerald -->
+    <linearGradient id="branch" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#10B981"/>
+      <stop offset="100%" stop-color="#34D399"/>
     </linearGradient>
-    <linearGradient id="nodeB" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#34D399"/>
-      <stop offset="100%" stop-color="#059669"/>
+
+    <!-- Node glows -->
+    <radialGradient id="glowAmber" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#FBBF24" stop-opacity="0.5"/>
+      <stop offset="100%" stop-color="#FBBF24" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowEmerald" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#34D399" stop-opacity="0.5"/>
+      <stop offset="100%" stop-color="#34D399" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowSky" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.5"/>
+      <stop offset="100%" stop-color="#38BDF8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowViolet" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#A78BFA" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#A78BFA" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Badge border highlight -->
+    <linearGradient id="border" x1="12" y1="12" x2="244" y2="244" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#334155"/>
+      <stop offset="50%" stop-color="#1E293B"/>
+      <stop offset="100%" stop-color="#064E3B"/>
     </linearGradient>
-    <linearGradient id="nodeC" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#38BDF8"/>
-      <stop offset="100%" stop-color="#0284C7"/>
-    </linearGradient>
+
+    <!-- Soft ambient light on the badge -->
+    <radialGradient id="ambient" cx="40%" cy="30%" r="60%">
+      <stop offset="0%" stop-color="#F59E0B" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#F59E0B" stop-opacity="0"/>
+    </radialGradient>
   </defs>
 
-  <!-- Rounded squircle badge -->
-  <rect x="12" y="12" width="232" height="232" rx="54" fill="url(#bg)" stroke="#1E293B" stroke-width="4"/>
+  <!-- === Badge === -->
+  <rect x="12" y="12" width="232" height="232" rx="52" fill="url(#bg)" stroke="url(#border)" stroke-width="3"/>
+  <rect x="12" y="12" width="232" height="232" rx="52" fill="url(#ambient)"/>
 
-  <!-- Subtle orchard canopy halo -->
-  <circle cx="128" cy="108" r="74" fill="#10B981" fill-opacity="0.07"/>
-  <circle cx="144" cy="86" r="46" fill="#F59E0B" fill-opacity="0.08"/>
+  <!-- === Canopy halo (very subtle) === -->
+  <ellipse cx="130" cy="100" rx="68" ry="56" fill="#10B981" fill-opacity="0.05"/>
 
-  <!-- Git worktree branches -->
-  <path d="M128 164C98 164 76 146 66 118" stroke="url(#crook)" stroke-width="11" stroke-linecap="round"/>
-  <path d="M128 182C158 182 182 166 194 140" stroke="url(#crook)" stroke-width="11" stroke-linecap="round"/>
-  <path d="M128 128C108 128 94 110 88 82" stroke="url(#crook)" stroke-width="10" stroke-linecap="round"/>
+  <!-- === Worktree branches (thinner, more organic) === -->
+  <!-- Left low branch -->
+  <path d="M124 170C100 168 80 152 68 128" stroke="url(#branch)" stroke-width="6" stroke-linecap="round" stroke-opacity="0.7"/>
+  <!-- Right low branch -->
+  <path d="M132 174C156 172 178 158 190 136" stroke="url(#branch)" stroke-width="6" stroke-linecap="round" stroke-opacity="0.7"/>
+  <!-- Left upper branch -->
+  <path d="M122 138C104 134 92 118 86 96" stroke="url(#branch)" stroke-width="5" stroke-linecap="round" stroke-opacity="0.55"/>
 
-  <!-- Shepherd's crook main trunk (Supervisor spine) -->
-  <path d="M128 210V94C128 71.9086 145.909 54 168 54C190.091 54 208 71.9086 208 94C208 113.882 191.882 130 172 130H158"
-        stroke="url(#crook)" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- === Shepherd's crook (main spine — bold, clean) === -->
+  <path d="M128 214V98C128 72 148 54 170 54C194 54 210 72 210 96C210 116 196 130 176 130H160"
+        stroke="url(#crook)" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
 
-  <!-- Root platform -->
-  <path d="M92 210H164" stroke="#34D399" stroke-width="12" stroke-linecap="round"/>
+  <!-- === Root platform === -->
+  <path d="M94 214H162" stroke="#34D399" stroke-width="10" stroke-linecap="round"/>
 
-  <!-- Seat Node 1: Supervisor / Director (Amber Gold) -->
-  <circle cx="168" cy="94" r="14" fill="url(#nodeA)"/>
-  <circle cx="168" cy="94" r="6" fill="#0F172A"/>
+  <!-- === Seat Nodes with glows === -->
 
-  <!-- Seat Node 2: Builder A Worktree (Emerald) -->
-  <circle cx="62" cy="108" r="18" fill="url(#nodeB)" stroke="#0F172A" stroke-width="4"/>
-  <circle cx="62" cy="108" r="6" fill="#ECFDF5"/>
+  <!-- Node 1: Supervisor at the crook hook (Amber) -->
+  <circle cx="170" cy="96" r="24" fill="url(#glowAmber)"/>
+  <circle cx="170" cy="96" r="13" fill="#FBBF24"/>
+  <circle cx="170" cy="96" r="5.5" fill="#0F172A"/>
+  <circle cx="167" cy="93" r="2" fill="#FDE68A" fill-opacity="0.7"/>
 
-  <!-- Seat Node 3: Builder B Worktree (Sky Blue) -->
-  <circle cx="198" cy="132" r="18" fill="url(#nodeC)" stroke="#0F172A" stroke-width="4"/>
-  <circle cx="198" cy="132" r="6" fill="#F0F9FF"/>
+  <!-- Node 2: Builder A — left branch end (Emerald) -->
+  <circle cx="64" cy="122" r="22" fill="url(#glowEmerald)"/>
+  <circle cx="64" cy="122" r="14" fill="#34D399" stroke="#0F172A" stroke-width="3"/>
+  <circle cx="64" cy="122" r="5" fill="#ECFDF5"/>
+  <circle cx="61" cy="119" r="1.5" fill="white" fill-opacity="0.5"/>
 
-  <!-- Seat Node 4: Blind Reviewer / Gauntlet (Amber-Emerald) -->
-  <circle cx="86" cy="70" r="16" fill="url(#nodeA)" stroke="#0F172A" stroke-width="4"/>
-  <circle cx="86" cy="70" r="5.5" fill="#FFFBEB"/>
+  <!-- Node 3: Builder B — right branch end (Sky Blue) -->
+  <circle cx="194" cy="130" r="22" fill="url(#glowSky)"/>
+  <circle cx="194" cy="130" r="14" fill="#38BDF8" stroke="#0F172A" stroke-width="3"/>
+  <circle cx="194" cy="130" r="5" fill="#F0F9FF"/>
+  <circle cx="191" cy="127" r="1.5" fill="white" fill-opacity="0.5"/>
+
+  <!-- Node 4: Blind Reviewer — left upper branch end (Violet) -->
+  <circle cx="82" cy="90" r="20" fill="url(#glowViolet)"/>
+  <circle cx="82" cy="90" r="12" fill="#A78BFA" stroke="#0F172A" stroke-width="3"/>
+  <circle cx="82" cy="90" r="4.5" fill="#EDE9FE"/>
+  <circle cx="79.5" cy="87.5" r="1.5" fill="white" fill-opacity="0.4"/>
+
+  <!-- === DAG dependency edges (subtle dotted connections between nodes) === -->
+  <line x1="82" y1="102" x2="68" y2="112" stroke="#A78BFA" stroke-width="1.5" stroke-dasharray="3 3" stroke-opacity="0.4"/>
+  <line x1="170" y1="109" x2="190" y2="120" stroke="#FBBF24" stroke-width="1.5" stroke-dasharray="3 3" stroke-opacity="0.4"/>
 </svg>
