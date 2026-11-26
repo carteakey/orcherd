@@ -428,8 +428,15 @@ pub fn run_foreground(once: bool) -> Result<(), String> {
     let mut last_data_version = -1i64;
     let mut last_tick = Instant::now() - Duration::from_secs(10);
     let mut backoff = RingBackoff::default();
+    let mut binary = crate::self_update::BinaryWatch::start();
 
     loop {
+        if let Some(new_binary) = binary.as_mut().and_then(crate::self_update::BinaryWatch::replaced) {
+            // Keeps the pid, so `daemon.lock` stays valid; the new code rebinds the sockets.
+            let err = crate::self_update::reexec(&new_binary);
+            eprintln!("orcherd daemon: couldn't re-exec `{}`: {err}", new_binary.display());
+            binary = None;
+        }
         #[cfg(unix)]
         {
             refresh_remote_listeners(&state_dir, &mut listeners);

@@ -347,7 +347,7 @@ CREATE INDEX idx_audit_team_seq ON audit(team_id, seq);
 
 ## 5. Doorbell & Auto-Escalation Loop (`orcherd daemon`)
 
-One `orcherd daemon` process runs per database file, holding `<state_dir>/orcherd/daemon.lock`. `orcherd init` and `orcherd spawn` auto-start it detached if no process holds the lock.
+One `orcherd daemon` process runs per database file, holding `<state_dir>/orcherd/daemon.lock`. `orcherd init` and `orcherd spawn` auto-start it detached if no process holds the lock. When the `orcherd` binary on disk is replaced (an install or deploy), the daemon re-executes the new one in place within about 10 s, keeping its pid and the lock. A replacement must be unchanged across two 5 s checks and pass `--version` first, so a copy in progress or a broken build never takes over.
 
 ### 5.1 Event-Driven Delivery over `herdr-core`
 The daemon connects to `herdr-core` (`orcherd_hc::Core`) and subscribes to `events.subscribe`:

@@ -21,6 +21,7 @@ pub mod identity;
 pub mod mod_install;
 pub mod output;
 pub mod remote;
+pub mod self_update;
 pub mod skills;
 pub mod tunnel;
 pub mod worktree;
