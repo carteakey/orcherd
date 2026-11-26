@@ -865,3 +865,49 @@ fn read_only_ops_leave_no_audit_rows_and_teams_resolve_by_repo_path() {
         None
     );
 }
+
+#[test]
+fn a_stuck_doorbell_escalates_to_the_supervisor_once_and_stays_undelivered() {
+    let dir = tempdir().unwrap();
+    let mut store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+    let team_id = init_review_team(&mut store);
+    store
+        .apply(
+            &seat_actor("super"),
+            RequestEnvelope::new(Op::Send {
+                to: "zcode1".to_string(),
+                subject: "craft check".to_string(),
+                body: "answer".to_string(),
+            }),
+        )
+        .unwrap();
+    let seq = store.list_undelivered_inbox(&team_id, "zcode1").unwrap()[0].seq;
+
+    let escalations = |store: &mut Store| {
+        let ReceiptData::Inbox(items) = store
+            .apply(
+                &seat_actor("super"),
+                RequestEnvelope::new(Op::InboxRead { peek: true, seat: Some("super".to_string()), limit: None }),
+            )
+            .unwrap()
+            .data
+        else {
+            panic!("expected inbox");
+        };
+        items.iter().filter(|i| i.kind == InboxKind::Escalation).count()
+    };
+    for _ in 0..2 {
+        store
+            .apply(
+                &human(),
+                RequestEnvelope::new(Op::DaemonRecordDoorbell {
+                    seat: "zcode1".to_string(),
+                    rung_through_seq: seq,
+                    outcome: DoorbellOutcome::StatusMismatch,
+                }),
+            )
+            .unwrap();
+    }
+    assert_eq!(escalations(&mut store), 1, "deduplicated to one notice");
+    assert_eq!(store.list_undelivered_inbox(&team_id, "zcode1").unwrap().len(), 1);
+}

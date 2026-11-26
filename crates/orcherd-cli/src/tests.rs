@@ -329,3 +329,15 @@ fn antigravity_seats_launch_agy_without_permission_prompts() {
     );
     assert_eq!(build_agent_argv("claude", None, Some("latest")), ["claude", "--resume"]);
 }
+
+#[test]
+fn doorbells_ring_seats_that_end_turns_as_done() {
+    use crate::daemon::{Ring, ring_condition};
+    use orcherd_hc::wire::StatusState;
+    // agy ends a turn as `done` and stays there; gating on `idle` alone never rang it (#12).
+    assert_eq!(ring_condition(Some(StatusState::Done)), Ring::Now);
+    assert_eq!(ring_condition(Some(StatusState::Idle)), Ring::IfIdle);
+    assert_eq!(ring_condition(Some(StatusState::Working)), Ring::Wait);
+    assert_eq!(ring_condition(Some(StatusState::Error)), Ring::Now);
+    assert_eq!(ring_condition(None), Ring::Now);
+}

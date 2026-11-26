@@ -92,8 +92,74 @@ pub fn stop(state_dir: &Path) -> Result<DaemonStatus, String> {
     })
 }
 
+/// How long a doorbell may be refused before the supervisor hears about it once.
+const ESCALATE_AFTER: Duration = Duration::from_secs(60);
+
+/// When to ring a seat, from the status its harness reports to herdr-core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ring {
+    /// Mid-turn: wait. The doorbell goes out when the turn ends.
+    Wait,
+    /// `idle`: ring, with herdr-core re-checking `idle` as it types.
+    IfIdle,
+    /// Turn over but not `idle` (`done`, `error`, no status reported): ring now.
+    /// herdr-core still refuses a terminal blocked on a dialog.
+    Now,
+}
+
+/// `hc send --if` only takes `idle` or `working`, and some harnesses (agy) end a turn as
+/// `done` and stay there, so gating on `idle` alone never rang them (#12).
+pub fn ring_condition(state: Option<StatusState>) -> Ring {
+    match state {
+        Some(StatusState::Working) => Ring::Wait,
+        Some(StatusState::Idle) => Ring::IfIdle,
+        Some(StatusState::Blocked | StatusState::Done | StatusState::Error | StatusState::Other) | None => Ring::Now,
+    }
+}
+
+/// Per-seat memory of refused rings, kept by the daemon instead of the store so a seat
+/// that can't take its doorbell doesn't write an audit row every tick.
+#[derive(Debug, Default)]
+pub struct RingBackoff {
+    refused_since: BTreeMap<(String, String), Instant>,
+    escalated: std::collections::BTreeSet<(String, String)>,
+}
+
+impl RingBackoff {
+    /// True once this seat's rings have been refused for longer than `ESCALATE_AFTER`.
+    fn stalled(&mut self, key: &(String, String)) -> bool {
+        self.refused_since.entry(key.clone()).or_insert_with(Instant::now).elapsed() >= ESCALATE_AFTER
+    }
+
+    /// True the first time it's asked for this seat since the last delivery.
+    fn escalate_once(&mut self, key: &(String, String)) -> bool {
+        self.escalated.insert(key.clone())
+    }
+
+    fn clear(&mut self, key: &(String, String)) {
+        self.refused_since.remove(key);
+        self.escalated.remove(key);
+    }
+}
+
+fn record_doorbell(store: &mut Store, actor: &Actor, team_id: &str, seat: &str, seq: i64, outcome: DoorbellOutcome) {
+    let _ = store.apply(
+        actor,
+        RequestEnvelope::new(Op::DaemonRecordDoorbell {
+            seat: seat.to_owned(),
+            rung_through_seq: seq,
+            outcome,
+        })
+        .with_team(team_id),
+    );
+}
+
 /// Runs one delivery and escalation pass across all teams in `store`, using `core` when available.
-pub fn tick_once(store: &mut Store, core: Option<&Core>) -> Result<usize, String> {
+pub fn tick_once(
+    store: &mut Store,
+    core: Option<&Core>,
+    backoff: &mut RingBackoff,
+) -> Result<usize, String> {
     let team_ids = list_all_team_ids(store)?;
     let mut deliveries = 0usize;
     let actor = Actor::Human {
@@ -135,6 +201,7 @@ pub fn tick_once(store: &mut Store, core: Option<&Core>) -> Result<usize, String
                 .list_undelivered_inbox(&team_id, &seat.name)
                 .map_err(|e| format!("failed listing undelivered inbox: {e}"))?;
             if undelivered.is_empty() {
+                backoff.clear(&(team_id.clone(), seat.seat_id.clone()));
                 continue;
             }
             let Some(latest) = undelivered.last() else {
@@ -147,24 +214,22 @@ pub fn tick_once(store: &mut Store, core: Option<&Core>) -> Result<usize, String
                 continue;
             };
 
-            // Verify via herdr-core that the terminal exists and the agent is still in front (SPEC.md §5.1).
-            if let Some(ref terms) = listed_terminals
-                && let Some(record) = terms
+            let key = (team_id.clone(), seat.seat_id.clone());
+            let record = listed_terminals.as_ref().and_then(|terms| {
+                terms
                     .iter()
                     .find(|r| r.address == target_address || r.address == *terminal)
+            });
+
+            // Verify via herdr-core that the agent is still in front (SPEC.md §5.1).
+            // Escalate once per stall: each escalation settles the dispatch as failed.
+            if let Some(record) = record
                 && record.foreground.is_some()
                 && !orcherd_hc::reply::agent_in_front(record, &seat.agent)
             {
-                let _ = store.apply(
-                    &actor,
-                    RequestEnvelope::new(Op::DaemonRecordDoorbell {
-                        seat: seat.name.clone(),
-                        rung_through_seq: max_seq,
-                        outcome: DoorbellOutcome::Unreachable,
-                    })
-                    .with_team(&team_id),
-                );
-                if let Some(dispatch_id) = active_dispatch_for_seat(&proj, &seat.seat_id) {
+                if backoff.escalate_once(&key)
+                    && let Some(dispatch_id) = active_dispatch_for_seat(&proj, &seat.seat_id)
+                {
                     let _ = store.apply(
                         &actor,
                         RequestEnvelope::new(Op::DaemonEscalate {
@@ -182,90 +247,65 @@ pub fn tick_once(store: &mut Store, core: Option<&Core>) -> Result<usize, String
                 continue;
             }
 
+            let state = record.and_then(|r| r.status.as_ref()).map(|st| st.state);
+            let only_if = match ring_condition(state) {
+                Ring::Wait => continue,
+                Ring::IfIdle => Some("idle"),
+                Ring::Now => None,
+            };
             let send_res = core.send(&SendText {
                 force: false,
-                only_if: Some("idle"),
+                only_if,
                 terminal: &target_address,
                 text: &doorbell_line,
             });
 
+            // Only real deliveries and one-time escalations reach the store (and its audit log).
+            // A refused ring retries on the next tick and escalates once after ESCALATE_AFTER.
             match send_res {
-                Ok(sent) => {
-                    let outcome = match sent.started {
-                        Some(true) => DoorbellOutcome::Confirmed,
-                        None => DoorbellOutcome::Unconfirmed,
-                        Some(false) => DoorbellOutcome::StatusMismatch,
+                Ok(sent) if sent.started != Some(false) => {
+                    let outcome = if sent.started == Some(true) {
+                        DoorbellOutcome::Confirmed
+                    } else {
+                        DoorbellOutcome::Unconfirmed
                     };
-                    let _ = store.apply(
-                        &actor,
-                        RequestEnvelope::new(Op::DaemonRecordDoorbell {
-                            seat: seat.name.clone(),
-                            rung_through_seq: max_seq,
-                            outcome,
-                        })
-                        .with_team(&team_id),
-                    );
-                    if matches!(
-                        outcome,
-                        DoorbellOutcome::Confirmed | DoorbellOutcome::Unconfirmed
-                    ) {
-                        deliveries += 1;
-                    }
-                }
-                Err(HcError::Refused {
-                    kind: Some(ref kind),
-                    ref message,
-                    ..
-                }) if kind == STATUS_MISMATCH => {
-                    let _ = message;
-                    let _ = store.apply(
-                        &actor,
-                        RequestEnvelope::new(Op::DaemonRecordDoorbell {
-                            seat: seat.name.clone(),
-                            rung_through_seq: max_seq,
-                            outcome: DoorbellOutcome::StatusMismatch,
-                        })
-                        .with_team(&team_id),
-                    );
+                    record_doorbell(store, &actor, &team_id, &seat.name, max_seq, outcome);
+                    backoff.clear(&key);
+                    deliveries += 1;
                 }
                 Err(HcError::Refused {
                     kind: Some(ref kind),
                     ref message,
                     ..
                 }) if kind == BLOCKED => {
-                    let _ = store.apply(
-                        &actor,
-                        RequestEnvelope::new(Op::DaemonRecordDoorbell {
-                            seat: seat.name.clone(),
-                            rung_through_seq: max_seq,
-                            outcome: DoorbellOutcome::Blocked,
-                        })
-                        .with_team(&team_id),
-                    );
-                    let _ = store.apply(
-                        &actor,
-                        RequestEnvelope::new(Op::DaemonEscalate {
-                            seat: seat.name.clone(),
-                            dispatch_id: active_dispatch_for_seat(&proj, &seat.seat_id),
-                            stop_reason: "blocked".to_owned(),
-                            detail: format!(
-                                "terminal `{target_address}` is blocked on a dialog: {message}"
-                            ),
-                        })
-                        .with_team(&team_id),
-                    );
+                    if backoff.escalate_once(&key) {
+                        record_doorbell(store, &actor, &team_id, &seat.name, max_seq, DoorbellOutcome::Blocked);
+                        let _ = store.apply(
+                            &actor,
+                            RequestEnvelope::new(Op::DaemonEscalate {
+                                seat: seat.name.clone(),
+                                dispatch_id: active_dispatch_for_seat(&proj, &seat.seat_id),
+                                stop_reason: "blocked".to_owned(),
+                                detail: format!(
+                                    "terminal `{target_address}` is blocked on a dialog: {message}"
+                                ),
+                            })
+                            .with_team(&team_id),
+                        );
+                    }
                 }
-                Err(err) => {
-                    let _ = store.apply(
-                        &actor,
-                        RequestEnvelope::new(Op::DaemonRecordDoorbell {
-                            seat: seat.name.clone(),
-                            rung_through_seq: max_seq,
-                            outcome: DoorbellOutcome::Unreachable,
-                        })
-                        .with_team(&team_id),
-                    );
-                    let _ = err;
+                refused => {
+                    let outcome = match refused {
+                        Err(HcError::Refused { kind: Some(ref kind), .. }) if kind == STATUS_MISMATCH => {
+                            DoorbellOutcome::StatusMismatch
+                        }
+                        Ok(_) => DoorbellOutcome::StatusMismatch,
+                        Err(_) => DoorbellOutcome::Unreachable,
+                    };
+                    if backoff.stalled(&key) && backoff.escalate_once(&key) {
+                        // Recording a failed outcome writes one escalation to the supervisor.
+                        record_doorbell(store, &actor, &team_id, &seat.name, max_seq, outcome);
+                    }
                 }
             }
         }
@@ -379,7 +419,7 @@ pub fn run_foreground(once: bool) -> Result<(), String> {
     let mut subscription = core.as_ref().and_then(|c| c.subscribe().ok());
 
     if once {
-        let _ = tick_once(&mut store, core.as_ref())?;
+        let _ = tick_once(&mut store, core.as_ref(), &mut RingBackoff::default())?;
         return Ok(());
     }
 
@@ -387,6 +427,7 @@ pub fn run_foreground(once: bool) -> Result<(), String> {
     let mut listeners = bind_remote_listeners(&state_dir);
     let mut last_data_version = -1i64;
     let mut last_tick = Instant::now() - Duration::from_secs(10);
+    let mut backoff = RingBackoff::default();
 
     loop {
         #[cfg(unix)]
@@ -417,7 +458,7 @@ pub fn run_foreground(once: bool) -> Result<(), String> {
                             TerminalChange::Status {
                                 status: Some(ref s),
                                 ..
-                            } if s.state == StatusState::Idle
+                            } if matches!(s.state, StatusState::Idle | StatusState::Done)
                         )
                 ) {
                     woke_by_event = true;
@@ -431,7 +472,7 @@ pub fn run_foreground(once: bool) -> Result<(), String> {
             || current_dv != last_data_version
             || last_tick.elapsed() >= Duration::from_secs(2)
         {
-            let _ = tick_once(&mut store, core.as_ref());
+            let _ = tick_once(&mut store, core.as_ref(), &mut backoff);
             last_data_version = store.data_version().unwrap_or(current_dv);
             last_tick = Instant::now();
         }

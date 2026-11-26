@@ -13,6 +13,6 @@ Engineering guidance for agents working in the `orcherd` repository. Read this a
 ## Architecture Rules
 
 - **Single transaction per mutation**: `orcherd_core::apply(&mut Store, &Actor, Op) -> Result<Receipt>` validates input, mutates records, writes any resulting `inbox` rows, logs an `audit` row, and records `mutation_receipts` in one SQLite transaction.
-- **Doorbells carry no payload**: `orcherd daemon` never pastes prompts or user text into a terminal. It sends only the fixed one-line doorbell via `terminal.send { only_if: Some("idle") }` and records the `Sent` receipt in `doorbell`.
+- **Doorbells carry no payload**: `orcherd daemon` never pastes prompts or user text into a terminal. It sends only the fixed one-line doorbell, when the seat's turn is over (`idle`, or `done` for harnesses like agy; never mid-`working`), and records only real deliveries in `doorbell`.
 - **Reviewer blindness invariant**: A task's `reviewer_seat` must never equal its `assignee_seat`. `apply` rejects self-review assignments and self-verdicts.
 - **File-first multiline inputs**: Every command that accepts a brief, message body, or completion report must accept `--spec-file`, `--body-file`, or `--result-file`.

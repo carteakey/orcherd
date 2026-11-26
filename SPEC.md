@@ -353,21 +353,23 @@ The daemon connects to `herdr-core` (`orcherd_hc::Core`) and subscribes to `even
    - `TerminalChange::Status { status: Some(Status { state: StatusState::Blocked, kind, msg, .. }), .. }`: Records `doorbell.outcome = 'blocked'` and writes a deduplicated `escalation` row (`stop_reason = 'blocked'`, with `kind` = `permission` | `auth` | `question` and `msg`) to the Supervisor's `inbox`.
    - `TerminalChange::Finished(ended)` or `TerminalChange::Lost(ended)`: If the seat had an unsettled `working` dispatch, transitions the dispatch to `settled_failed` (`stop_reason = 'exited'` or `'lost'`), increments `failure_count` (tripping `circuit_broken` on attempt 3), and writes an `escalation` row to the Supervisor's `inbox`.
    - `Notice::Missed { terminals, .. }`: Re-syncs the full terminal table before taking action.
-   - **SQLite `PRAGMA data_version` Poll (every 1s)**: Detects new `inbox` rows written by in-process CLI calls and rings any recipient seat that is already `idle`.
+   - **SQLite `PRAGMA data_version` Poll (every 1s)**: Detects new `inbox` rows written by in-process CLI calls and rings any recipient seat whose turn is over (`idle` or `done`).
 
-2. **Idle-Gated Doorbell Send**:
+2. **Turn-Gated Doorbell Send**:
    - Verify the agent is still the foreground program (`reply::agent_in_front`).
+   - Decide from the seat's live `hc` status. `hc send --if` takes only `idle` or `working`, and some harnesses (agy) end a turn as `done` and stay there, so gating on `idle` alone never rang them (#12):
+     - `working` -> don't ring; the turn's end (an `idle` or `done` event) triggers the next tick.
+     - `idle` -> `terminal.send { only_if: Some("idle"), force: false }`, so the core re-checks as it types.
+     - `done`, `error`, or no reported status -> `terminal.send { only_if: None, force: false }`. The core still refuses a terminal blocked on a dialog.
    - Send the fixed payload-free doorbell line:
      ```text
      [Orcherd] You have N unread item(s) (latest: <kind> <ref_id>). Run: orcherd inbox
      ```
-     via `terminal.send { terminal, text: doorbell, only_if: Some("idle"), force: false }`.
-   - Record the `Sent { started, status, turn }` receipt:
+   - Record only what happened, so refusals never flood the audit log:
      - `started: Some(true)` -> stamp `inbox.delivered_at`, set `doorbell.outcome = 'confirmed'`, `attempts = 0`.
      - `started: None` (harness does not report OSC 7501) -> stamp `inbox.delivered_at`, set `doorbell.outcome = 'unconfirmed'`.
-     - `started: Some(false)` -> increment `attempts`, backoff (2s, 5s, 15s), retry while idle.
-     - Refused `status_mismatch` -> wait for next `StatusState::Idle` event.
-     - Refused `blocked` -> set `doorbell.outcome = 'blocked'`, wake Supervisor with `escalation`.
+     - `started: Some(false)` or refused `status_mismatch` / unreachable -> nothing is written; the daemon retries on later ticks and, after 60 s of refusals, records the outcome once, which sends the Supervisor one `escalation` ("isn't taking its doorbell").
+     - Refused `blocked` -> once per stall: set `doorbell.outcome = 'blocked'`, wake Supervisor with `escalation`.
 
 ---
 

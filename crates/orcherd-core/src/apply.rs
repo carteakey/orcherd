@@ -818,6 +818,24 @@ fn exec_daemon_record_doorbell(conn: &Connection, team_id: &str, now: &str, seat
     } else if outcome == DoorbellOutcome::Blocked {
         let supervisor = find_supervisor_seat_name(conn, team_id)?;
         write_dedup_escalation_inbox(conn, team_id, &supervisor, &seat.name, &seat.seat_id, &format!("Seat '{}' is blocked on a terminal prompt", seat.name), "Doorbell refused because seat terminal status is blocked.", now)?;
+    } else if matches!(outcome, DoorbellOutcome::StatusMismatch | DoorbellOutcome::Unreachable) {
+        // The daemon records these only after a seat has refused its doorbell for a while,
+        // so this is the supervisor's one notice that a handoff is stuck.
+        let supervisor = find_supervisor_seat_name(conn, team_id)?;
+        write_dedup_escalation_inbox(
+            conn,
+            team_id,
+            &supervisor,
+            &seat.name,
+            &seat.seat_id,
+            &format!("Seat '{}' isn't taking its doorbell", seat.name),
+            &format!(
+                "Doorbell refused ({}) for over a minute; the seat has unread items it hasn't been told about. Check its terminal with `orcherd seat read {}`.",
+                outcome.as_str(),
+                seat.name
+            ),
+            now,
+        )?;
     }
 
     let doorbell = get_doorbell(conn, team_id, &seat.seat_id)?.unwrap_or(Doorbell {

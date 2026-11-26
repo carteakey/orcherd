@@ -87,7 +87,7 @@ flowchart LR
     end
     S & W & R -- "orcherd inbox / ask / done / verdict" --> DB[(SQLite)]
     D[orcherd daemon] -- "watches" --> DB
-    D -- "one-line doorbell, only when idle" --> hc
+    D -- "one-line doorbell, between turns" --> hc
     D -- "escalates blocked or crashed seats" --> S
     UI[Herdr app board] -- "orcherd status --json" --> DB
 ```
@@ -95,7 +95,8 @@ flowchart LR
 - **State lives in SQLite, not a window.** Commands open `store.sqlite3` in-process (WAL). Each one
   validates, writes, queues inbox items, and logs an audit row in one transaction. Reads write no audit rows.
 - **Doorbells carry no payload.** Briefs and answers sit in the inbox. The daemon only types a
-  fixed one-liner, and only when `hc` says the agent is idle, so nothing gets truncated or typed into a busy prompt.
+  fixed one-liner between turns (when `hc` reports the agent idle or done), so nothing gets truncated or typed into a busy prompt.
+  A seat that won't take its doorbell for a minute is reported to the supervisor once.
 - **Seats persist; dispatches don't.** A seat (`builder-a`) keeps its terminal across tasks, so the
   agent stays signed in and warm. Each task attempt is a dispatch, recorded before the terminal starts.
 - **Review is blind by construction.** A task's reviewer can never be its assignee. Three `fix`
