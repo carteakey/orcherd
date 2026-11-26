@@ -1,41 +1,29 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" fill="none">
-  <title>Orcherd</title>
-  <!--
-    Orcherd mark: a shepherd's crook (the supervisor) that grows like an orchard tree.
-    Its branches are git worktrees; each ends in a seat. The ringed seat is the blind
-    reviewer, kept on its own branch, apart from the builders it reviews.
-    Flat shapes on a 16px grid so it reads at 16-24px as well as 256px.
-  -->
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="256" y2="256" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#14261D"/>
-      <stop offset="1" stop-color="#0A1413"/>
-    </linearGradient>
-    <linearGradient id="crook" x1="128" y1="56" x2="128" y2="212" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#FFD27A"/>
-      <stop offset="1" stop-color="#F0A33C"/>
-    </linearGradient>
-  </defs>
+  <title>orcherd</title>
+  <!-- A herd of terminal agents: a sheep whose head is a shell prompt. -->
+  <rect width="256" height="256" rx="58" fill="#17142A"/>
 
-  <rect width="256" height="256" rx="58" fill="url(#bg)"/>
-  <rect x="1.5" y="1.5" width="253" height="253" rx="56.5" stroke="#FFFFFF" stroke-opacity="0.07" stroke-width="3"/>
-
-  <!-- Worktree branches -->
-  <g stroke="#3FB67E" stroke-width="11" stroke-linecap="round">
-    <path d="M116 176C92 176 72 162 66 138"/>
-    <path d="M116 200C146 200 170 190 182 168"/>
+  <!-- Legs -->
+  <g stroke="#433A6B" stroke-width="16" stroke-linecap="round">
+    <path d="M118 170v38"/>
+    <path d="M182 168v38"/>
   </g>
-  <!-- Reviewer's branch: dashed, it never touches the builders' work -->
-  <path d="M116 134C100 134 88 124 84 110" stroke="#8B7CF6" stroke-width="7" stroke-linecap="round" stroke-dasharray="1 13"/>
 
-  <!-- Crook: the supervisor -->
-  <path d="M116 216V96C116 74 132 58 154 58C176 58 192 74 192 96V116" stroke="url(#crook)" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Wool: an ellipse under the curls so the outline has no gaps -->
+  <g fill="#F5F1E8">
+    <ellipse cx="150" cy="128" rx="66" ry="46"/>
+    <circle cx="104" cy="104" r="28"/>
+    <circle cx="140" cy="86" r="30"/>
+    <circle cx="180" cy="94" r="28"/>
+    <circle cx="206" cy="126" r="24"/>
+    <circle cx="194" cy="160" r="24"/>
+    <circle cx="154" cy="172" r="26"/>
+    <circle cx="112" cy="162" r="26"/>
+  </g>
 
-  <!-- Seats -->
-  <circle cx="64" cy="130" r="17" fill="#4ADE9A"/>
-  <circle cx="186" cy="160" r="17" fill="#5CB8FF"/>
-  <circle cx="78" cy="96" r="12" fill="#0A1413" stroke="#A99BFF" stroke-width="7"/>
-
-  <!-- Ground -->
-  <path d="M92 216H140" stroke="url(#crook)" stroke-width="18" stroke-linecap="round"/>
+  <!-- Head: a terminal with a prompt -->
+  <ellipse cx="34" cy="98" rx="20" ry="11" transform="rotate(-32 34 98)" fill="#2C2548"/>
+  <rect x="28" y="94" width="86" height="72" rx="22" fill="#2C2548"/>
+  <path d="M48 116l15 13-15 13" stroke="#7CF0B0" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M72 144h22" stroke="#7CF0B0" stroke-width="10" stroke-linecap="round"/>
 </svg>

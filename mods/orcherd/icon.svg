@@ -1,10 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-  <!-- Orcherd: crook (supervisor), two worktree branches with seats, ringed reviewer. -->
-  <path d="M11 21V9a4 4 0 0 1 8 0v2.5"/>
-  <path d="M11 16.5c-2.4 0-4.2-1.3-4.8-3.5" stroke-width="1.6"/>
-  <path d="M11 19c2.6 0 4.6-.9 5.6-2.9" stroke-width="1.6"/>
-  <circle cx="5.6" cy="11.6" r="1.9" fill="currentColor" stroke="none"/>
-  <circle cx="17.4" cy="15.2" r="1.9" fill="currentColor" stroke="none"/>
-  <circle cx="6.8" cy="7.2" r="1.5" stroke-width="1.4"/>
-  <path d="M8.5 21h5"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  <!-- orcherd: a sheep whose head is a shell prompt. One color, tinted by the app. -->
+  <path d="M12.5 7.2a2.6 2.6 0 0 1 4.6-.6 2.5 2.5 0 0 1 3.4 3 2.4 2.4 0 0 1-.6 4.4 2.5 2.5 0 0 1-4 1.6 2.6 2.6 0 0 1-3.9-.6"/>
+  <rect x="2.5" y="8" width="9" height="7.5" rx="2.4"/>
+  <path d="M5 10.4l1.6 1.4L5 13.2M8 13.6h1.6"/>
+  <path d="M13.5 16.4v3M18 16.2v3"/>
 </svg>
