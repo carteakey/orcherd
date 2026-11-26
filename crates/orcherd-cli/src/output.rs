@@ -2,14 +2,33 @@
 
 use orcherd_core::{Receipt, ReceiptData};
 use serde::Serialize;
+use std::io::{self, Write as _};
+
+/// Writes `text` to stdout. A reader that went away (`| head`) ends the process with
+/// status 0, as `cat` and `git` do; other write errors exit 1 with the reason.
+pub fn emit(text: &str, newline: bool) {
+    let mut stdout = io::stdout().lock();
+    let written = stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| if newline { stdout.write_all(b"\n") } else { Ok(()) })
+        .and_then(|()| stdout.flush());
+    match written {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => std::process::exit(0),
+        Err(e) => {
+            eprintln!("orcherd error: failed writing to stdout: {e}");
+            std::process::exit(1);
+        }
+    }
+}
 
 pub fn print_value<T: Serialize>(value: &T, json: bool, human: impl FnOnce(&T) -> String) {
     if json {
         if let Ok(s) = serde_json::to_string_pretty(value) {
-            println!("{s}");
+            outln!("{s}");
         }
     } else {
-        println!("{}", human(value));
+        outln!("{}", human(value));
     }
 }
 

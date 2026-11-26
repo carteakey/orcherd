@@ -91,21 +91,21 @@ pub fn run_from_args(raw_args: Vec<String>) -> Result<i32, String> {
     let (global, args) = extract_global_flags(raw_args)?;
     if global.version {
         if global.json {
-            println!(
+            outln!(
                 "{{\"name\":\"orcherd\",\"version\":\"{}\"}}",
                 env!("CARGO_PKG_VERSION")
             );
         } else {
-            println!("orcherd {}", env!("CARGO_PKG_VERSION"));
+            outln!("orcherd {}", env!("CARGO_PKG_VERSION"));
         }
         return Ok(0);
     }
     if args.is_empty() {
-        print!("{HELP_TEXT}");
+        out!("{HELP_TEXT}");
         return Ok(0);
     }
     if global.help {
-        print!("{}", subcommand_help(args[0].as_str()));
+        out!("{}", subcommand_help(args[0].as_str()));
         return Ok(0);
     }
 
@@ -851,7 +851,7 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
         }
     }
 
-    println!("{}", format_receipt(&receipt, global.json));
+    outln!("{}", format_receipt(&receipt, global.json));
     Ok(0)
 }
 
@@ -924,7 +924,7 @@ pub fn run_op_raw(op: Op, global: &GlobalFlags) -> Result<Receipt, String> {
 
 pub(crate) fn execute_op(op: Op, global: &GlobalFlags) -> Result<i32, String> {
     let receipt = run_op_raw(op, global)?;
-    println!("{}", format_receipt(&receipt, global.json));
+    outln!("{}", format_receipt(&receipt, global.json));
     Ok(0)
 }
 

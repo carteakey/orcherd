@@ -2,6 +2,16 @@
 // Tests start real processes and use unwrap/expect; production code uses `new_command`.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+/// `println!` that exits quietly when stdout is closed (`orcherd log | head`) instead of
+/// panicking with "failed printing to stdout: Broken pipe".
+macro_rules! outln {
+    ($($arg:tt)*) => { $crate::output::emit(&format!($($arg)*), true) };
+}
+/// `print!` with the same broken-pipe handling as `outln!`.
+macro_rules! out {
+    ($($arg:tt)*) => { $crate::output::emit(&format!($($arg)*), false) };
+}
+
 pub mod board;
 pub mod cli;
 pub mod daemon;
