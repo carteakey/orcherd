@@ -1,0 +1,17 @@
+# Orcherd declarative Herdr UI mod (right-hand panel + activity bar app).
+# Install: copy or symlink to ~/.config/herdr/gpui-mods/orcherd
+name = "orcherd"
+api = 1
+places = ["panel", "status_bar"]
+commands = [
+  { id = "toggle-filter", title = "Toggle active/blocked seats filter" },
+  { id = "refresh", title = "Refresh Orcherd board snapshot" },
+]
+
+[panel]
+title = "Orcherd Crew"
+order = 150
+
+[activity]
+title = "Orcherd"
+icon = "icon.svg"
