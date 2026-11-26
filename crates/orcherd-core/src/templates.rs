@@ -37,19 +37,19 @@ const REVIEW_CREW_SEATS: &[SeatTemplate] = &[
     SeatTemplate {
         name: "zcode1",
         role: SeatRole::Worker,
-        default_agent: "zcode",
+        default_agent: "antigravity",
         standing_brief: "Builder seat 1: execute assigned tasks in isolated worktrees and report verification.",
     },
     SeatTemplate {
         name: "zcode2",
         role: SeatRole::Worker,
-        default_agent: "zcode",
+        default_agent: "antigravity",
         standing_brief: "Builder seat 2: execute assigned tasks in isolated worktrees and report verification.",
     },
     SeatTemplate {
         name: "zcode3",
         role: SeatRole::Worker,
-        default_agent: "zcode",
+        default_agent: "antigravity",
         standing_brief: "Builder seat 3: execute assigned tasks in isolated worktrees and report verification.",
     },
 ];
@@ -64,25 +64,25 @@ const STUDIO_CREW_SEATS: &[SeatTemplate] = &[
     SeatTemplate {
         name: "builder-a",
         role: SeatRole::Worker,
-        default_agent: "zcode",
+        default_agent: "antigravity",
         standing_brief: "Primary studio builder A: implement assigned slice and run verification.",
     },
     SeatTemplate {
         name: "builder-b",
         role: SeatRole::Worker,
-        default_agent: "zcode",
+        default_agent: "antigravity",
         standing_brief: "Primary studio builder B: implement assigned slice and run verification.",
     },
     SeatTemplate {
         name: "gauntlet",
         role: SeatRole::Reviewer,
-        default_agent: "claude",
+        default_agent: "antigravity",
         standing_brief: "Gauntlet blind QA reviewer: verify correctness, edge cases, and test gates.",
     },
     SeatTemplate {
         name: "viewer-value",
         role: SeatRole::Reviewer,
-        default_agent: "claude",
+        default_agent: "antigravity",
         standing_brief: "Viewer-value reviewer: evaluate user experience, polish, and domain quality.",
     },
 ];
@@ -97,19 +97,19 @@ const SMALL_SEATS: &[SeatTemplate] = &[
     SeatTemplate {
         name: "w1",
         role: SeatRole::Worker,
-        default_agent: "zcode",
+        default_agent: "antigravity",
         standing_brief: "Worker seat 1: implement assigned tasks and report completion.",
     },
     SeatTemplate {
         name: "w2",
         role: SeatRole::Worker,
-        default_agent: "zcode",
+        default_agent: "antigravity",
         standing_brief: "Worker seat 2: implement assigned tasks and report completion.",
     },
     SeatTemplate {
         name: "w3",
         role: SeatRole::Worker,
-        default_agent: "zcode",
+        default_agent: "antigravity",
         standing_brief: "Worker seat 3: implement assigned tasks and report completion.",
     },
 ];

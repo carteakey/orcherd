@@ -336,7 +336,7 @@ fn exec_spawn_prepare(conn: &Connection, team_id: &str, actor: &Actor, now: &str
     } else {
         let seat_id = new_id("seat");
         let r = role.unwrap_or(SeatRole::Worker);
-        let ag = agent.unwrap_or_else(|| "zcode".to_string());
+        let ag = agent.unwrap_or_else(|| "antigravity".to_string());
         let ko = keep_open.unwrap_or(true);
         conn.execute(
             "INSERT INTO seats (team_id, seat_id, name, role, agent, model, account, effort, address_kind, worktree_path, branch, keep_open, resume_session, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'none', ?9, ?10, ?11, ?12, ?13, ?13)",

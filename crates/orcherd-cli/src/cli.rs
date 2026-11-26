@@ -3,25 +3,33 @@
 use crate::{
     board::{
         handle_approve, handle_ask, handle_bulletin, handle_done, handle_finding, handle_gate,
-        handle_inbox, handle_log, handle_reply, handle_send, handle_task, handle_verdict,
+        handle_inbox, handle_log, handle_reply, handle_seat, handle_send, handle_task,
+        handle_verdict,
     },
     daemon,
     identity::{resolve_actor, resolve_db_path, resolve_state_dir, resolve_team_arg},
     mod_install,
-    output::{format_receipt, print_value},
+    output::{format_receipt, print_value, subcommand_help},
     remote, skills, tunnel,
     worktree::{self, WorktreeSpec},
 };
 use orcherd_core::{
     Address, Op, Receipt, ReceiptData, RequestEnvelope, SeatRole, Store, TemplateKind,
 };
-use orcherd_hc::{Core, Endpoint, wire::Run};
+use orcherd_hc::{
+    Core, Endpoint, PROGRAM as HC_PROGRAM,
+    agent::{self, Until},
+    reply::agent_in_front,
+    start as start_hc,
+    wire::Run,
+};
 use std::{
     collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
     str::FromStr,
-    time::Duration,
+    sync::atomic::AtomicBool,
+    time::{Duration, Instant},
 };
 
 pub const HELP_TEXT: &str = "\
@@ -92,8 +100,12 @@ pub fn run_from_args(raw_args: Vec<String>) -> Result<i32, String> {
         }
         return Ok(0);
     }
-    if global.help || args.is_empty() {
+    if args.is_empty() {
         print!("{HELP_TEXT}");
+        return Ok(0);
+    }
+    if global.help {
+        print!("{}", subcommand_help(args[0].as_str()));
         return Ok(0);
     }
 
@@ -434,6 +446,11 @@ fn handle_init(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
         copies = cfg.team.bootstrap_copies;
     }
 
+    if env::var_os("ORCHERD_NO_AUTO_DAEMON").is_none() {
+        let state_dir = resolve_state_dir();
+        let _ = daemon::start_detached(&state_dir);
+    }
+
     execute_op(
         Op::Init {
             name: resolved_name,
@@ -445,6 +462,52 @@ fn handle_init(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
         },
         global,
     )
+}
+
+fn connect_or_start_core() -> Result<Core, String> {
+    let ep = Endpoint::resolve_env().map_err(|e| format!("failed to resolve herdr-core endpoint: {e}"))?;
+    if let Ok(core) = Core::connect(&ep) {
+        return Ok(core);
+    }
+    let binary = find_hc_binary().ok_or_else(|| {
+        format!(
+            "`{HC_PROGRAM}` (`hc`) is not running at `{}` and could not be found on PATH",
+            ep.socket.display()
+        )
+    })?;
+    start_hc(&binary, |_| {}, Duration::from_secs(10))
+        .map_err(|e| format!("failed to start `{}`: {e}", binary.display()))?;
+    Core::connect(&ep).map_err(|e| format!("failed to connect to herdr-core after start: {e}"))
+}
+
+fn find_hc_binary() -> Option<PathBuf> {
+    if let Some(p) = env::var_os("HC_BINARY").filter(|v| !v.is_empty()) {
+        let pb = PathBuf::from(p);
+        if pb.is_file() {
+            return Some(pb);
+        }
+    }
+    if let Some(path_var) = env::var_os("PATH") {
+        for dir in env::split_paths(&path_var) {
+            for candidate in [HC_PROGRAM, "hc"] {
+                let full = dir.join(candidate);
+                if full.is_file() {
+                    return Some(full);
+                }
+            }
+        }
+    }
+    if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+        for candidate in [
+            home.join(".local/bin").join(HC_PROGRAM),
+            home.join(".local/bin/hc"),
+        ] {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
@@ -575,6 +638,52 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
     )?;
 
     let actor = resolve_actor(Some(&store), Some(&team.team_id), global.act_as.as_deref());
+
+    if !no_launch && env::var_os("ORCHERD_NO_AUTO_DAEMON").is_none() {
+        let _ = daemon::start_detached(&state_dir);
+    }
+
+    let core_res = if no_launch || explicit_terminal.is_some() {
+        Err("skipped".to_owned())
+    } else {
+        connect_or_start_core()
+    };
+
+    // Before SpawnPrepare decides warm_reuse, verify against live herdr-core that any
+    // bound terminal is still alive and still has the expected agent in front (SPEC.md §3.2).
+    if let Ok(ref core) = core_res
+        && let Ok(proj) = store.team_projection(&team.team_id)
+        && let Some(existing) = proj.seats.iter().find(|s| s.name == seat_name)
+        && let Address::Core {
+            machine: ref m,
+            terminal: ref t,
+        } = existing.address
+    {
+        let target_addr = match m {
+            Some(mach) if !t.contains('/') => format!("{mach}/{t}"),
+            _ => t.clone(),
+        };
+        let expected_agent = agent.as_deref().unwrap_or(&existing.agent);
+        let still_alive = core.list(false).ok().is_some_and(|list| {
+            list.terminals
+                .iter()
+                .find(|r| r.address == target_addr || r.address == *t)
+                .is_some_and(|rec| {
+                    rec.foreground.is_none() || agent_in_front(rec, expected_agent)
+                })
+        });
+        if !still_alive {
+            let _ = store.apply(
+                &actor,
+                RequestEnvelope::new(Op::SeatRebind {
+                    seat: seat_name.clone(),
+                    address: Address::None,
+                })
+                .with_team(&team.team_id),
+            );
+        }
+    }
+
     let mut env_req = RequestEnvelope::new(Op::SpawnPrepare {
         seat: seat_name.clone(),
         role,
@@ -607,8 +716,14 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
     } = receipt.data
     {
         let dispatch_id = dispatch.as_ref().map(|d| d.dispatch_id.clone());
+        let seat_name_cloned = seat.name.clone();
+        let seat_agent_cloned = seat.agent.clone();
+        let seat_model_cloned = seat.model.clone();
+        let seat_role_str = seat.role.to_string();
+        let seat_keep_open = seat.keep_open;
+
         if let Some(term) = explicit_terminal {
-            let bind_receipt = store
+            let _ = store
                 .apply(
                     &actor,
                     RequestEnvelope::new(Op::SpawnBindAddress {
@@ -625,78 +740,107 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
                     .with_team(&team.team_id),
                 )
                 .map_err(|e| e.to_string())?;
-            let _ = bind_receipt;
-        } else if !warm_reuse
-            && !no_launch
-            && let Ok(ep) = Endpoint::resolve_env()
-            && let Ok(core) = Core::connect(&ep)
-        {
-            let exe = env::current_exe()
-                .ok()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "orcherd".to_owned());
-            let mut env_map = BTreeMap::new();
-            env_map.insert("ORCHERD_CLI_COMMAND", exe.as_str());
-            env_map.insert("ORCHERD_TEAM", team.team_id.as_str());
-            env_map.insert("ORCHERD_SEAT", seat.name.as_str());
-            if let Some(ref d_id) = dispatch_id {
-                env_map.insert("ORCHERD_DISPATCH", d_id.as_str());
+        } else if warm_reuse {
+            if let Ok(ref core) = core_res {
+                let _ = daemon::tick_once(&mut store, Some(core));
             }
+        } else if !no_launch {
             if let Some(ref m) = machine {
-                env_map.insert("ORCHERD_MACHINE", m.as_str());
-                env_map.insert(
-                    "ORCHERD_REMOTE_SOCKET",
-                    tunnel::default_remote_socket_expr(),
-                );
+                let _ = tunnel::spawn_background_tunnel(&state_dir, m, None, &[]);
             }
+            match core_res {
+                Ok(core) => {
+                    let exe = env::current_exe()
+                        .ok()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "orcherd".to_owned());
+                    let mut env_map = BTreeMap::new();
+                    env_map.insert("ORCHERD_CLI_COMMAND", exe.as_str());
+                    env_map.insert("ORCHERD_TEAM", team.team_id.as_str());
+                    env_map.insert("ORCHERD_SEAT", seat_name_cloned.as_str());
+                    if let Some(ref d_id) = dispatch_id {
+                        env_map.insert("ORCHERD_DISPATCH", d_id.as_str());
+                    }
+                    if let Some(ref m) = machine {
+                        env_map.insert("ORCHERD_MACHINE", m.as_str());
+                        env_map.insert(
+                            "ORCHERD_REMOTE_SOCKET",
+                            tunnel::default_remote_socket_expr(),
+                        );
+                    }
 
-            let role_str = seat.role.to_string();
-            let mut labels = BTreeMap::new();
-            labels.insert("orcherd.team", team.team_id.as_str());
-            labels.insert("orcherd.seat", seat.name.as_str());
-            labels.insert("orcherd.role", role_str.as_str());
+                    let mut labels = BTreeMap::new();
+                    labels.insert("orcherd.team", team.team_id.as_str());
+                    labels.insert("orcherd.seat", seat_name_cloned.as_str());
+                    labels.insert("orcherd.role", seat_role_str.as_str());
 
-            let argv = build_agent_argv(&seat.agent, seat.model.as_deref(), resume_session.as_deref());
-            let cwd_str = prepared_wt.path.display().to_string();
-            let run_req = Run {
-                argv: &argv,
-                cwd: Some(&cwd_str),
-                env: env_map,
-                keep: seat.keep_open,
-                labels,
-                name: Some(&seat.name),
-                on: machine.as_deref(),
-            };
-            if let Ok(terminal) = core.run(&run_req) {
-                let _ = store.apply(
-                    &actor,
-                    RequestEnvelope::new(Op::SpawnBindAddress {
-                        seat: seat.name.clone(),
-                        dispatch_id,
-                        address: Address::Core {
-                            machine,
-                            terminal: terminal.address.clone(),
-                        },
-                        worktree_path: Some(cwd_str),
-                        branch: prepared_wt.branch,
-                        resume_session,
-                    })
-                    .with_team(&team.team_id),
-                );
-                let _ = daemon::tick_once(&mut store, Some(&core));
-                if let Ok(updated) = store.apply(
-                    &actor,
-                    RequestEnvelope::new(Op::SeatShow {
-                        seat: seat.name.clone(),
-                    })
-                    .with_team(&team.team_id),
-                ) && let ReceiptData::Seat(updated_seat) = updated.data
-                    && let ReceiptData::SpawnPrepared {
-                        seat: ref mut r_seat,
-                        ..
-                    } = receipt.data
-                {
-                    *r_seat = updated_seat;
+                    let argv = build_agent_argv(
+                        &seat_agent_cloned,
+                        seat_model_cloned.as_deref(),
+                        resume_session.as_deref(),
+                    );
+                    let cwd_str = prepared_wt.path.display().to_string();
+                    let run_req = Run {
+                        argv: &argv,
+                        cwd: Some(&cwd_str),
+                        env: env_map,
+                        keep: seat_keep_open,
+                        labels,
+                        name: Some(&seat_name_cloned),
+                        on: machine.as_deref(),
+                    };
+                    match core.run(&run_req) {
+                        Ok(terminal) => {
+                            let stop_flag = AtomicBool::new(false);
+                            let until = Until {
+                                deadline: Instant::now() + Duration::from_secs(3),
+                                stop: &stop_flag,
+                            };
+                            let _ = agent::ready(&core, &terminal.address, until);
+                            let _ = store.apply(
+                                &actor,
+                                RequestEnvelope::new(Op::SpawnBindAddress {
+                                    seat: seat_name_cloned.clone(),
+                                    dispatch_id,
+                                    address: Address::Core {
+                                        machine,
+                                        terminal: terminal.address.clone(),
+                                    },
+                                    worktree_path: Some(cwd_str),
+                                    branch: prepared_wt.branch,
+                                    resume_session,
+                                })
+                                .with_team(&team.team_id),
+                            );
+                            let _ = daemon::tick_once(&mut store, Some(&core));
+                            if let Ok(updated) = store.apply(
+                                &actor,
+                                RequestEnvelope::new(Op::SeatShow {
+                                    seat: seat_name_cloned,
+                                })
+                                .with_team(&team.team_id),
+                            ) && let ReceiptData::Seat(updated_seat) = updated.data
+                                && let ReceiptData::SpawnPrepared {
+                                    seat: ref mut r_seat,
+                                    ..
+                                } = receipt.data
+                            {
+                                *r_seat = updated_seat;
+                            }
+                        }
+                        Err(err) => {
+                            receipt.failed_stage = Some("terminal_run".to_owned());
+                            receipt.next = Some(format!(
+                                "herdr-core terminal.run failed ({err}); check `{seat_agent_cloned}` on PATH and retry with `orcherd spawn --seat {seat_name_cloned}`"
+                            ));
+                        }
+                    }
+                }
+                Err(err) => {
+                    receipt.failed_stage = Some("herdr_core_connect".to_owned());
+                    receipt.next = Some(format!(
+                        "herdr-core unavailable ({err}); start `hc server start` and rerun `orcherd spawn --seat {seat_name_cloned}`"
+                    ));
                 }
             }
         }
@@ -719,178 +863,6 @@ fn build_agent_argv(agent: &str, model: Option<&str>, resume: Option<&str>) -> V
         }
     }
     argv
-}
-
-fn handle_seat(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
-    let sub = args.first().map(String::as_str).unwrap_or("list");
-    let rest = if args.is_empty() { &[] } else { &args[1..] };
-    match sub {
-        "list" => {
-            let include_remote = rest.iter().any(|a| a == "--include-remote");
-            execute_op(Op::SeatList { include_remote }, global)
-        }
-        "show" => {
-            let seat = rest
-                .first()
-                .ok_or_else(|| "`seat show <seat>` requires a seat name".to_owned())?
-                .clone();
-            execute_op(Op::SeatShow { seat }, global)
-        }
-        "read" => {
-            let seat_name = rest
-                .first()
-                .ok_or_else(|| "`seat read <seat>` requires a seat name".to_owned())?;
-            let mut lines = 40u32;
-            let mut i = 1;
-            while i < rest.len() {
-                match rest[i].as_str() {
-                    "--lines" | "--limit" => {
-                        i += 1;
-                        lines = req_val(rest, i, "--lines")?
-                            .parse::<u32>()
-                            .map_err(|e| format!("invalid `--lines`: {e}"))?;
-                    }
-                    other => return Err(format!("unknown `seat read` option `{other}`")),
-                }
-                i += 1;
-            }
-            read_seat_terminal(seat_name, lines, global)
-        }
-        "stop" => {
-            let target = rest
-                .first()
-                .ok_or_else(|| "`seat stop <seat|dispatch_id>` requires a target".to_owned())?
-                .clone();
-            execute_op(
-                Op::SeatStop {
-                    target,
-                    reason: Some("user_stopped".to_owned()),
-                },
-                global,
-            )
-        }
-        "abandon" => {
-            let dispatch_id = rest
-                .first()
-                .ok_or_else(|| "`seat abandon <dispatch_id>` requires a dispatch ID".to_owned())?
-                .clone();
-            execute_op(Op::SeatAbandon { dispatch_id }, global)
-        }
-        "release" => {
-            let dispatch_id = rest
-                .first()
-                .ok_or_else(|| "`seat release <dispatch_id>` requires a dispatch ID".to_owned())?
-                .clone();
-            execute_op(Op::SeatRelease { dispatch_id }, global)
-        }
-        "rebind" => {
-            let seat = rest
-                .first()
-                .ok_or_else(|| "`seat rebind <seat>` requires a seat name".to_owned())?
-                .clone();
-            let mut terminal = None;
-            let mut machine = None;
-            let mut i = 1;
-            while i < rest.len() {
-                match rest[i].as_str() {
-                    "--terminal" => {
-                        i += 1;
-                        terminal = Some(req_val(rest, i, "--terminal")?.to_owned());
-                    }
-                    "--machine" | "--on" => {
-                        i += 1;
-                        machine = Some(req_val(rest, i, "--machine")?.to_owned());
-                    }
-                    other => return Err(format!("unknown `seat rebind` option `{other}`")),
-                }
-                i += 1;
-            }
-            let term = terminal
-                .or_else(|| env::var("HC_TERMINAL_ID").ok())
-                .ok_or_else(|| "`seat rebind` requires `--terminal <id>` or `$HC_TERMINAL_ID`".to_owned())?;
-            execute_op(
-                Op::SeatRebind {
-                    seat,
-                    address: Address::Core {
-                        machine,
-                        terminal: term,
-                    },
-                },
-                global,
-            )
-        }
-        "remove" => {
-            let seat = rest
-                .first()
-                .ok_or_else(|| "`seat remove <seat>` requires a seat name".to_owned())?
-                .clone();
-            execute_op(Op::SeatRemove { seat }, global)
-        }
-        "handoff" => {
-            let mut to_seat = None;
-            let mut i = 0;
-            while i < rest.len() {
-                match rest[i].as_str() {
-                    "--to" => {
-                        i += 1;
-                        to_seat = Some(req_val(rest, i, "--to")?.to_owned());
-                    }
-                    val if !val.starts_with('-') && to_seat.is_none() => {
-                        to_seat = Some(val.to_owned());
-                    }
-                    other => return Err(format!("unknown `seat handoff` option `{other}`")),
-                }
-                i += 1;
-            }
-            let to_seat = to_seat.ok_or_else(|| "`seat handoff` requires `--to <seat>`".to_owned())?;
-            execute_op(Op::SeatHandoff { to_seat }, global)
-        }
-        other => Err(format!("unknown `seat` subcommand `{other}`")),
-    }
-}
-
-fn read_seat_terminal(seat_name: &str, lines: u32, global: &GlobalFlags) -> Result<i32, String> {
-    let receipt = run_op_raw(
-        Op::SeatShow {
-            seat: seat_name.to_owned(),
-        },
-        global,
-    )?;
-    let ReceiptData::Seat(seat) = receipt.data else {
-        return Err("unexpected receipt for seat show".to_owned());
-    };
-    let preview = match &seat.address {
-        Address::Core { machine, terminal } => {
-            let target = match machine {
-                Some(m) if !terminal.contains('/') => format!("{m}/{terminal}"),
-                _ => terminal.clone(),
-            };
-            if let Ok(ep) = Endpoint::resolve_env()
-                && let Ok(core) = Core::connect(&ep)
-            {
-                core.read_preview(&target, lines, Duration::from_secs(2))
-                    .unwrap_or_else(|e| format!("(terminal `{target}` read preview unavailable: {e})"))
-            } else {
-                format!("(herdr-core offline; seat `{}` assigned to `{target}`)", seat.name)
-            }
-        }
-        other => format!("(seat `{}` address is `{other}`)", seat.name),
-    };
-    #[derive(serde::Serialize)]
-    struct SeatReadOutput {
-        address: String,
-        output: String,
-        seat: String,
-    }
-    let out = SeatReadOutput {
-        seat: seat.name,
-        address: seat.address.to_string(),
-        output: preview,
-    };
-    print_value(&out, global.json, |o| {
-        format!("=== {} ({}) ===\n{}", o.seat, o.address, o.output)
-    });
-    Ok(0)
 }
 
 pub fn run_op_raw(op: Op, global: &GlobalFlags) -> Result<Receipt, String> {

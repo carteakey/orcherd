@@ -1,13 +1,235 @@
 //! Board, inbox, decision gate, bulletin, finding, approval, and audit CLI handlers.
 
-use crate::cli::{
-    GlobalFlags, execute_op, parse_list_arg, read_optional_file_or_inline,
-    read_required_file_or_inline, req_val,
+use crate::{
+    cli::{
+        GlobalFlags, execute_op, parse_list_arg, read_optional_file_or_inline,
+        read_required_file_or_inline, req_val, run_op_raw,
+    },
+    output::print_value,
 };
 use orcherd_core::{
-    Confidence, DoneOutcome, GateStatus, Op, PostKind, TaskStatus, VerdictKind,
+    Address, Confidence, DoneOutcome, GateStatus, Op, PostKind, ReceiptData, TaskStatus,
+    VerdictKind,
 };
-use std::{path::PathBuf, str::FromStr};
+use orcherd_hc::{Core, Endpoint};
+use std::{env, path::PathBuf, str::FromStr, time::Duration};
+
+pub fn handle_seat(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
+    let sub = args.first().map(String::as_str).unwrap_or("list");
+    let rest = if args.is_empty() { &[] } else { &args[1..] };
+    match sub {
+        "list" => {
+            let include_remote = rest.iter().any(|a| a == "--include-remote");
+            execute_op(Op::SeatList { include_remote }, global)
+        }
+        "show" => {
+            let seat = rest
+                .first()
+                .ok_or_else(|| "`seat show <seat>` requires a seat name".to_owned())?
+                .clone();
+            execute_op(Op::SeatShow { seat }, global)
+        }
+        "read" => {
+            let seat_name = rest
+                .first()
+                .ok_or_else(|| "`seat read <seat>` requires a seat name".to_owned())?;
+            let mut lines = 40u32;
+            let mut i = 1;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--lines" | "--limit" => {
+                        i += 1;
+                        lines = req_val(rest, i, "--lines")?
+                            .parse::<u32>()
+                            .map_err(|e| format!("invalid `--lines`: {e}"))?;
+                    }
+                    other => return Err(format!("unknown `seat read` option `{other}`")),
+                }
+                i += 1;
+            }
+            read_seat_terminal(seat_name, lines, global)
+        }
+        "stop" => {
+            let target = rest
+                .first()
+                .ok_or_else(|| "`seat stop <seat|dispatch_id>` requires a target".to_owned())?
+                .clone();
+            kill_target_terminal_in_core(&target, global);
+            execute_op(
+                Op::SeatStop {
+                    target,
+                    reason: Some("user_stopped".to_owned()),
+                },
+                global,
+            )
+        }
+        "abandon" => {
+            let dispatch_id = rest
+                .first()
+                .ok_or_else(|| "`seat abandon <dispatch_id>` requires a dispatch ID".to_owned())?
+                .clone();
+            execute_op(Op::SeatAbandon { dispatch_id }, global)
+        }
+        "release" => {
+            let dispatch_id = rest
+                .first()
+                .ok_or_else(|| "`seat release <dispatch_id>` requires a dispatch ID".to_owned())?
+                .clone();
+            kill_target_terminal_in_core(&dispatch_id, global);
+            execute_op(Op::SeatRelease { dispatch_id }, global)
+        }
+        "rebind" => {
+            let seat = rest
+                .first()
+                .ok_or_else(|| "`seat rebind <seat>` requires a seat name".to_owned())?
+                .clone();
+            let mut terminal = None;
+            let mut machine = None;
+            let mut i = 1;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--terminal" => {
+                        i += 1;
+                        terminal = Some(req_val(rest, i, "--terminal")?.to_owned());
+                    }
+                    "--machine" | "--on" => {
+                        i += 1;
+                        machine = Some(req_val(rest, i, "--machine")?.to_owned());
+                    }
+                    other => return Err(format!("unknown `seat rebind` option `{other}`")),
+                }
+                i += 1;
+            }
+            let term = terminal
+                .or_else(|| env::var("HC_TERMINAL_ID").ok())
+                .ok_or_else(|| "`seat rebind` requires `--terminal <id>` or `$HC_TERMINAL_ID`".to_owned())?;
+            execute_op(
+                Op::SeatRebind {
+                    seat,
+                    address: Address::Core {
+                        machine,
+                        terminal: term,
+                    },
+                },
+                global,
+            )
+        }
+        "remove" => {
+            let seat = rest
+                .first()
+                .ok_or_else(|| "`seat remove <seat>` requires a seat name".to_owned())?
+                .clone();
+            execute_op(Op::SeatRemove { seat }, global)
+        }
+        "handoff" => {
+            let mut to_seat = None;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--to" => {
+                        i += 1;
+                        to_seat = Some(req_val(rest, i, "--to")?.to_owned());
+                    }
+                    val if !val.starts_with('-') && to_seat.is_none() => {
+                        to_seat = Some(val.to_owned());
+                    }
+                    other => return Err(format!("unknown `seat handoff` option `{other}`")),
+                }
+                i += 1;
+            }
+            let to_seat = to_seat.ok_or_else(|| "`seat handoff` requires `--to <seat>`".to_owned())?;
+            execute_op(Op::SeatHandoff { to_seat }, global)
+        }
+        other => Err(format!("unknown `seat` subcommand `{other}`")),
+    }
+}
+
+fn kill_target_terminal_in_core(target: &str, global: &GlobalFlags) {
+    let Ok(status_receipt) = run_op_raw(Op::Status, global) else {
+        return;
+    };
+    let ReceiptData::TeamStatus(proj) = status_receipt.data else {
+        return;
+    };
+    let mut term_addr = None;
+    for seat in &proj.seats {
+        if (seat.name == target || seat.seat_id == target)
+            && let Address::Core {
+                ref machine,
+                ref terminal,
+            } = seat.address
+        {
+            term_addr = Some(match machine {
+                Some(m) if !terminal.contains('/') => format!("{m}/{terminal}"),
+                _ => terminal.clone(),
+            });
+            break;
+        }
+    }
+    if term_addr.is_none() {
+        for d in &proj.active_dispatches {
+            if d.dispatch_id.starts_with(target)
+                && let Some(ref t) = d.terminal_address
+            {
+                term_addr = Some(match d.machine {
+                    Some(ref m) if !t.contains('/') => format!("{m}/{t}"),
+                    _ => t.clone(),
+                });
+                break;
+            }
+        }
+    }
+    if let Some(addr) = term_addr
+        && let Ok(ep) = Endpoint::resolve_env()
+        && let Ok(core) = Core::connect(&ep)
+    {
+        let _ = core.kill(&addr);
+    }
+}
+
+fn read_seat_terminal(seat_name: &str, lines: u32, global: &GlobalFlags) -> Result<i32, String> {
+    let receipt = run_op_raw(
+        Op::SeatShow {
+            seat: seat_name.to_owned(),
+        },
+        global,
+    )?;
+    let ReceiptData::Seat(seat) = receipt.data else {
+        return Err("unexpected receipt for seat show".to_owned());
+    };
+    let preview = match &seat.address {
+        Address::Core { machine, terminal } => {
+            let target = match machine {
+                Some(m) if !terminal.contains('/') => format!("{m}/{terminal}"),
+                _ => terminal.clone(),
+            };
+            if let Ok(ep) = Endpoint::resolve_env()
+                && let Ok(core) = Core::connect(&ep)
+            {
+                core.read_preview(&target, lines, Duration::from_secs(2))
+                    .unwrap_or_else(|e| format!("(terminal `{target}` read preview unavailable: {e})"))
+            } else {
+                format!("(herdr-core offline; seat `{}` assigned to `{target}`)", seat.name)
+            }
+        }
+        other => format!("(seat `{}` address is `{other}`)", seat.name),
+    };
+    #[derive(serde::Serialize)]
+    struct SeatReadOutput {
+        address: String,
+        output: String,
+        seat: String,
+    }
+    let out = SeatReadOutput {
+        seat: seat.name,
+        address: seat.address.to_string(),
+        output: preview,
+    };
+    print_value(&out, global.json, |o| {
+        format!("=== {} ({}) ===\n{}", o.seat, o.address, o.output)
+    });
+    Ok(0)
+}
 
 pub fn handle_task(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
     let sub = args.first().map(String::as_str).unwrap_or("list");

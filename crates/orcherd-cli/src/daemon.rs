@@ -113,6 +113,8 @@ pub fn tick_once(store: &mut Store, core: Option<&Core>) -> Result<usize, String
             continue;
         }
 
+        let listed_terminals = core.and_then(|c| c.list(false).ok()).map(|l| l.terminals);
+
         for seat in &proj.seats {
             if seat.paused_at.is_some() {
                 continue;
@@ -144,6 +146,41 @@ pub fn tick_once(store: &mut Store, core: Option<&Core>) -> Result<usize, String
             let Some(core) = core else {
                 continue;
             };
+
+            // Verify via herdr-core that the terminal exists and the agent is still in front (SPEC.md §5.1).
+            if let Some(ref terms) = listed_terminals
+                && let Some(record) = terms
+                    .iter()
+                    .find(|r| r.address == target_address || r.address == *terminal)
+                && record.foreground.is_some()
+                && !orcherd_hc::reply::agent_in_front(record, &seat.agent)
+            {
+                let _ = store.apply(
+                    &actor,
+                    RequestEnvelope::new(Op::DaemonRecordDoorbell {
+                        seat: seat.name.clone(),
+                        rung_through_seq: max_seq,
+                        outcome: DoorbellOutcome::Unreachable,
+                    })
+                    .with_team(&team_id),
+                );
+                if let Some(dispatch_id) = active_dispatch_for_seat(&proj, &seat.seat_id) {
+                    let _ = store.apply(
+                        &actor,
+                        RequestEnvelope::new(Op::DaemonEscalate {
+                            seat: seat.name.clone(),
+                            dispatch_id: Some(dispatch_id),
+                            stop_reason: "exited".to_owned(),
+                            detail: format!(
+                                "agent `{}` exited back to shell in terminal `{target_address}`",
+                                seat.agent
+                            ),
+                        })
+                        .with_team(&team_id),
+                    );
+                }
+                continue;
+            }
 
             let send_res = core.send(&SendText {
                 force: false,

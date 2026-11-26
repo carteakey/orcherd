@@ -235,3 +235,100 @@ pub fn format_receipt(receipt: &Receipt, json: bool) -> String {
     }
     out.trim_end().to_owned()
 }
+
+pub fn subcommand_help(cmd: &str) -> &'static str {
+    match cmd {
+        "init" => "\
+orcherd init — Initialize a team in the current repository
+
+Usage: orcherd init [--name <name>] [--template <review-crew|studio-crew|small>] [--goal <text>] [--workspace-root <dir>] [--json]
+",
+        "spawn" | "worker-start" => "\
+orcherd spawn — Start or reuse a persistent seat on a task
+
+Usage: orcherd spawn --seat <name> [--role <supervisor|reviewer|planner|worker>]
+                     [--agent <id>] [--model <id>] [--account <id>] [--effort <low|medium|high|xhigh>]
+                     [--worktree <current|new-child|new-top-level|path:DIR>] [--base-branch <ref>]
+                     [--on <hc_machine>] [--task <task_id>] [--spec-file <path>] [--title <text>]
+                     [--keep-open] [--resume [<session_id>]] [--retry-of <dispatch_id>] [--no-launch] [--json]
+",
+        "seat" => "\
+orcherd seat — Manage persistent seats and their herdr-core terminals
+
+Usage:
+  orcherd seat list [--include-remote] [--json]
+  orcherd seat show <seat> [--json]
+  orcherd seat read <seat> [--lines <n>] [--json]
+  orcherd seat stop <seat|dispatch_id> [--json]
+  orcherd seat abandon <dispatch_id> [--json]
+  orcherd seat release <dispatch_id> [--json]
+  orcherd seat rebind <seat> [--terminal <hc_terminal>] [--machine <m>] [--json]
+  orcherd seat remove <seat> [--json]
+  orcherd seat handoff --to <seat> [--json]
+",
+        "task" => "\
+orcherd task — Manage the Task Board and DAG dependencies
+
+Usage:
+  orcherd task create --spec-file <path> [--title <text>] [--deps <id,id>] [--assign <seat>] [--reviewer <seat>] [--issue <ref>] [--json]
+  orcherd task list [--status <pending|ready|assigned|in_progress|blocked|review|completed|failed|all>] [--ready] [--json]
+  orcherd task show <task_id> [--json]
+  orcherd task assign <task_id> --to <seat> [--reviewer <seat>] [--spec-file <path>] [--json]
+  orcherd task claim <task_id> [--json]
+  orcherd task update <task_id> --status <status> [--json]
+",
+        "inbox" | "check" => "\
+orcherd inbox — Read and mark-read unread assignments, mentions, gate answers, and review requests
+
+Usage: orcherd inbox [--peek] [--seat <seat>] [--limit <n>] [--json]
+",
+        "send" => "\
+orcherd send — Send a direct or @group message to seats
+
+Usage: orcherd send --to <seat|dispatch:id|@all|@idle|@workers|@reviewers> [--subject <text>] --body-file <path> [--json]
+",
+        "ask" => "\
+orcherd ask — Create a blocking decision gate for the supervisor and pause the task
+
+Usage: orcherd ask [<task_id>] --question <text> [--body-file <path>] [--json]
+",
+        "reply" => "\
+orcherd reply — Answer a pending decision gate or inbox item and wake the worker
+
+Usage: orcherd reply <gate_id|item_id> --body-file <path> [--json]
+",
+        "done" | "worker-done" => "\
+orcherd done — Settle an active task and trigger blind review or DAG unblocking
+
+Usage: orcherd done [<task_id>] --result-file <path> [--branch <name>] [--commit <sha>] [--outcome <succeeded|failed>] [--json]
+",
+        "verdict" => "\
+orcherd verdict — Record a blind reviewer verdict (pass, fix, or escalate)
+
+Usage: orcherd verdict <task_id> --verdict <pass|fix|escalate> --body-file <path> [--json]
+",
+        "bulletin" => "\
+orcherd bulletin — Shared threaded team board
+
+Usage:
+  orcherd bulletin post --body-file <path> [--subject <text>] [--to <@seat,@seat>] [--reply-to <post_id>] [--kind <post|handoff|authorized>] [--json]
+  orcherd bulletin list [--after <seq>] [--limit <n>] [--json]
+",
+        "finding" => "\
+orcherd finding — Record or list durable evidence-backed findings
+
+Usage:
+  orcherd finding add --title <text> --evidence-file <path> [--task <task_id>] [--confidence <low|medium|high|verified>] [--json]
+  orcherd finding list [--json]
+",
+        "skills" | "skill" => "\
+orcherd skills — Load version-matched skill guides or install the discovery stub
+
+Usage:
+  orcherd skills list [--json]
+  orcherd skills get [orcherd] [--reference references/<file>.md] [--full] [--json]
+  orcherd skills install [--path <dir>] [--json]
+",
+        _ => crate::cli::HELP_TEXT,
+    }
+}
