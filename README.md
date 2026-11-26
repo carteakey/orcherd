@@ -150,8 +150,11 @@ orcherd mod install
 ```
 
 This adds a team board to the [Herdr desktop app](https://github.com/herdrdev/herdr-app). The board lists
-open decisions first, then seats with live status and unread counts, then tasks by state. It also
-posts a notification for each new question. Open it from the palette with **Orcherd: team board**.
+open decisions first, then seats with live status and unread counts, the latest bulletin posts, and tasks by state.
+Its **freeze** button (click twice) stops the whole team. It also posts a notification for each new question.
+Open it from the palette with **Orcherd: team board**.
+
+Seats you spawn from a Herdr terminal open as their own tabs in that space (`--no-ui` keeps one headless).
 
 ## Commands
 
@@ -168,6 +171,7 @@ Every command takes `--json`, `--team`, `--as <seat>`, and `--request-id` (safe 
 | `done`, `verdict` | Hand in a task; review it (`pass`, `fix`, `escalate`) |
 | `bulletin …`, `finding …` | Team-wide posts; durable evidence records |
 | `pending`, `approve` | Human approvals for roster changes |
+| `freeze`, `unfreeze` | Stop the whole team now (notify all, interrupt busy seats, refuse new work); resume |
 | `daemon …`, `tunnel` | Doorbells and escalations; remote machines |
 | `skills …`, `mod install` | Agent guide (`skills get orcherd`); the Herdr app board |
 

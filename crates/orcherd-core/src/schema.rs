@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current supported SQLite schema version (`PRAGMA user_version`).
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 const SCHEMA_V1_DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS teams (
@@ -230,8 +230,14 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
 
     conn.execute_batch("PRAGMA journal_mode = WAL;")?;
 
-    if found < SCHEMA_VERSION {
+    if found < 1 {
         conn.execute_batch(SCHEMA_V1_DDL)?;
+    }
+    if found < 2 {
+        // v2: why a team is frozen (`orcherd freeze`), shown to every caller it refuses.
+        conn.execute_batch("ALTER TABLE teams ADD COLUMN paused_reason TEXT;")?;
+    }
+    if found < SCHEMA_VERSION {
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
     }
 

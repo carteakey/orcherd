@@ -348,6 +348,17 @@ Usage:
   orcherd skills get [orcherd] [--reference references/<file>.md] [--full] [--json]
   orcherd skills install [--path <dir>] [--json]
 ",
+        "freeze" | "unfreeze" => "\
+orcherd freeze — Stop the whole team at once (supervisor or human)
+
+Usage:
+  orcherd freeze (--reason <text> | --reason-file <path>) [--json]
+  orcherd unfreeze [--json]
+
+Freeze notifies every seat, refuses new spawns, claims and assignments, and
+interrupts every seat that is mid-turn. Reads, ask, reply, done and verdict
+still work. Unfreeze lifts it and rings every seat to resume.
+",
         _ => crate::cli::HELP_TEXT,
     }
 }

@@ -20,14 +20,17 @@ ORCHERD spawn --seat <seat_name> --agent <agent> --worktree <current|new-child> 
 ```
 
 - **Persistent Seats vs. One-Off Workers**: `--seat <name>` binds work to a named roster seat (`zcode1`, `neon1`, `vicesuper`, `gauntlet`). If that seat already has a warm live terminal on `herdr-core`, `spawn` (or `task assign --to <seat>`) reuses the running signed-in agent process and rings its doorbell when idle—preserving OAuth sessions and context.
+- **Seats show in the Herdr app**: a seat spawned on this machine inherits your terminal's Herdr space (else the supervisor's) and opens there as its own tab. Pass `--no-ui` for a headless seat; seats placed `--on` another machine stay headless.
 - **Worktrees**: Use `--worktree current` for read-only reviews (`vicesuper`, `gauntlet`), docs, or non-overlapping edits. Use `--worktree new-child` when parallel builders touch the same repository; Orcherd automatically creates the child worktree and symlinks `bootstrap_symlinks` (`.env`, `.venv`, `node_modules`) from the workspace root.
 - **Parallel starts**: Start up to 4 independent seats at once from a single shell command (load `references/parallel-start.md`), then **end your turn**. Orcherd wakes you on `worker_done`, `question`, `verdict`, or `escalation`.
 - **Steer or follow up with a seat**:
   ```text
   ORCHERD send --to <seat_name|dispatch:id> --subject "<topic>" --body-file <msg.md>
   ```
-  A working seat receives the doorbell as soon as its current turn goes `idle`; a settled seat receives it as a follow-up turn.
+  A working seat receives the doorbell as soon as its current turn ends (`idle`, or `done` for harnesses like agy); a settled seat receives it as a follow-up turn. Don't ring seats yourself with `hc send`.
 - **Shared Bulletin**: Use `ORCHERD bulletin post --to @<seat> --body-file <post.md>` for team-wide context, branch handoffs, and `AUTHORIZED: push` notices that the whole crew should see.
+
+- **Emergency stop (supervisor)**: when work must stop now (a destructive command, a wrong target, a bad data write), run `ORCHERD freeze --reason "<why>"`. Every seat is notified, seats mid-turn are interrupted, and new spawns, claims, and assignments are refused until `ORCHERD unfreeze`. Use it instead of a bulletin post, which busy seats read late.
 
 Always:
 - **Wait for the doorbell after dispatching**: Let `orcherd daemon` wake you. Polling `inbox` or `seat read` in a loop wastes tokens and races with delivery receipts.
@@ -45,6 +48,8 @@ Run `ORCHERD inbox` to read and mark-read your pending items:
   - `pass`: Fast-forward or ship the verified work, mark the task completed, and dispatch the next ready tasks (`ORCHERD task list --ready`).
   - `fix`: Orcherd already returned the task to `in_progress` and rung the builder seat with the numbered fix round.
   - `escalate`: Three failed review rounds or a hard blocker—surface the options to the user.
+- **`notice` "Team frozen"**: stop. Finish or abandon the current step without starting anything new, report with `ORCHERD done` or `ORCHERD ask` if needed, then **end your turn** and wait for "Team unfrozen".
+- **`escalation` "Seat isn't taking its doorbell"**: the seat had unread items and refused its doorbell for over a minute. Check it with `ORCHERD seat read <seat> --lines 40` (often a dialog, a crashed harness, or a stuck status).
 - **`escalation` (`stop_reason: blocked | exited | lost | stalled`)**:
   - `blocked`: `herdr-core` reported `StatusState::Blocked` (an auth or permission dialog in the worker's terminal). If it is an OAuth sign-in screen, ask the user to sign in once in that terminal; do not spawn duplicate workers that will hit the same screen.
   - `exited` or `lost`: Load `references/recovery-and-cleanup.md` before retrying or stopping.

@@ -11,6 +11,8 @@ import { v_flex, h_flex } from "gpui-base";
 import { exec, spaces, terminals, theme, run, checking, nextCommand, notify, window, home } from "herdr";
 
 const POLL_MS = 5000;
+const BULLETIN_SHOWN = 6;
+const CONFIRM_MS = 4000; // the Freeze button arms on the first click and fires on the second
 const ICON = "mods/orcherd/icon.svg";
 
 // Most urgent first; completed work folds into a count at the end.
@@ -42,6 +44,9 @@ export default class Orcherd extends View {
     this.cwd = null;
     this.showDone = false;
     this.seenGates = null; // gate ids already announced; null until the first load
+    this.posts = [];
+    this.armedAt = 0; // when the Freeze/Unfreeze button was armed
+    this.acting = false;
     if (checking()) return;
     this.refresh(cx);
     cx.timer.every(POLL_MS, (cx) => {
@@ -75,6 +80,9 @@ export default class Orcherd extends View {
           this.proj = receipt?.data?.value ?? null;
           this.error = null;
           this.announce(this.proj);
+          // Bulletin: a read-only op, so polling it writes no audit rows.
+          const b = await exec("orcherd", ["--team", this.proj.team.team_id, "bulletin", "list", "--json"], { cwd, timeout: 10000 });
+          if (b.code === 0) this.posts = (JSON.parse(b.stdout)?.data?.value ?? []).slice(-BULLETIN_SHOWN).reverse();
         } else {
           const msg = (r.stderr || r.stdout).trim();
           // No team yet is a normal state, not an error.
@@ -91,6 +99,44 @@ export default class Orcherd extends View {
       }
       cx.notify();
     });
+  }
+
+  // Freeze or unfreeze the team as the human at this window (the app runs without a seat).
+  toggleFreeze(cx) {
+    const p = this.proj;
+    if (!p || this.acting) return;
+    if (Date.now() - this.armedAt > CONFIRM_MS) {
+      this.armedAt = Date.now();
+      cx.notify();
+      return;
+    }
+    this.armedAt = 0;
+    this.acting = true;
+    const args = p.team.paused_at
+      ? ["--team", p.team.team_id, "unfreeze"]
+      : ["--team", p.team.team_id, "freeze", "--reason", "Frozen from the Herdr app board"];
+    cx.spawn(async (cx) => {
+      const r = await exec("orcherd", args, { cwd: this.cwd ?? home(), timeout: 30000 }).catch((e) => ({ code: 1, stderr: String(e) }));
+      notify({
+        title: r.code === 0 ? (p.team.paused_at ? "Team unfrozen" : "Team frozen") : "Orcherd: freeze failed",
+        body: (r.code === 0 ? r.stdout : r.stderr || r.stdout).trim().split("\n").slice(0, 2).join(" "),
+        level: r.code === 0 ? "info" : "error",
+        icon: ICON,
+      });
+      this.acting = false;
+      this.refresh(cx);
+    });
+  }
+
+  postRow(t, post) {
+    const tone = post.kind === "authorized" ? t.done : post.kind === "handoff" ? t.working : t.muted;
+    return v_flex().px(8).py(4).gap(1)
+      .child(h_flex().gap(6).items_center().text_size(11)
+        .child(div().text_color(t.foreground).font_semibold().child(post.author_seat))
+        .when(post.kind !== "post", (el) => el.child(this.pill(t, post.kind, tone)))
+        .child(div().flex_1())
+        .child(div().text_color(t.dim).child(since(post.created_at))))
+      .child(div().text_color(t.muted).truncate().child(post.subject || post.body.split("\n")[0]));
   }
 
   // A toast when a seat asks the human-facing supervisor something, once per gate.
@@ -212,12 +258,21 @@ export default class Orcherd extends View {
     const open = p.tasks.length - done;
 
     let body = v_flex().gap(14);
+    if (p.team.paused_at) {
+      body = body.child(v_flex().px(10).py(8).gap(3).rounded(6).border(1).border_color(t.blocked)
+        .child(div().text_color(t.blocked).font_semibold().child(`Frozen ${since(p.team.paused_at)} ago`))
+        .child(div().text_color(t.foreground).child(p.team.paused_reason ?? "No reason given"))
+        .child(div().text_size(11).text_color(t.dim).child("New spawns, claims and assignments are refused.")));
+    }
     if (p.pending_gates.length > 0) {
       body = body.child(this.section(t, "Needs a decision", p.pending_gates.length,
         v_flex().gap(6).children(p.pending_gates.map((g) => this.gateRow(t, g)))));
     }
     body = body.child(this.section(t, "Seats", `${live.length}/${p.seats.length} live`,
       v_flex().gap(1).children(seatRows.map(({ s, term }) => this.seatRow(t, s, term, p.unread_counts?.[s.name] ?? 0, activeTask.get(s.name))))));
+    if (this.posts.length > 0) {
+      body = body.child(this.section(t, "Bulletin", null, v_flex().gap(1).children(this.posts.map((post) => this.postRow(t, post)))));
+    }
     const taskGroups = TASK_ORDER.filter((k) => byStatus[k]?.length).map((k) =>
       v_flex().gap(1)
         .child(div().px(8).text_size(11).text_color(k === "blocked" || k === "failed" ? t.blocked : k === "review" ? t.done : t.muted).child(`${TASK_LABEL[k]} · ${byStatus[k].length}`))
@@ -237,6 +292,13 @@ export default class Orcherd extends View {
           .child(svg(ICON).size(16).text_color(t.accent))
           .child(div().text_color(t.foreground).font_semibold().truncate().child(p.team.name))
           .child(div().flex_1())
+          .child(div().id("freeze").text_size(11)
+            .text_color(Date.now() - this.armedAt <= CONFIRM_MS ? t.blocked : t.dim)
+            .hover((s) => s.text_color(t.blocked))
+            .on_click((_e, cx) => this.toggleFreeze(cx))
+            .child(this.acting ? "…" : Date.now() - this.armedAt <= CONFIRM_MS
+              ? (p.team.paused_at ? "click to unfreeze" : "click to freeze all")
+              : (p.team.paused_at ? "unfreeze" : "freeze")))
           .child(div().id("refresh").text_size(11).text_color(t.dim).hover((s) => s.text_color(t.foreground))
             .on_click((_e, cx) => this.refresh(cx)).child("refresh")))
         .when(Boolean(p.team.goal), (el) => el.child(div().text_size(11.5).text_color(t.muted).child(p.team.goal)))
@@ -244,7 +306,7 @@ export default class Orcherd extends View {
           .child(this.pill(t, `${working} working`, working ? t.working : t.dim))
           .child(this.pill(t, `${blocked} blocked`, blocked ? t.blocked : t.dim))
           .child(this.pill(t, `${p.pending_gates.length} gates`, p.pending_gates.length ? t.working : t.dim))
-          .when(Boolean(p.team.paused_at), (el) => el.child(this.pill(t, "paused", t.blocked)))))
+          .when(Boolean(p.team.paused_at), (el) => el.child(this.pill(t, "frozen", t.blocked)))))
       .child(div().id("board").flex_1().overflow_y_scrollbar().p(8).child(body));
   }
 }

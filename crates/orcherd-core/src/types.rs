@@ -65,6 +65,9 @@ pub struct Team {
     pub bootstrap_symlinks: Vec<String>,
     pub bootstrap_copies: Vec<String>,
     pub paused_at: Option<String>,
+    /// Why the team is frozen (`orcherd freeze --reason`), while `paused_at` is set.
+    #[serde(default)]
+    pub paused_reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -754,6 +757,11 @@ pub enum Op {
     AuditLog {
         limit: Option<usize>,
     },
+    /// Stop the team: refuse new work until `Unfreeze`. Supervisor or human only.
+    Freeze {
+        reason: String,
+    },
+    Unfreeze,
     DaemonRecordDoorbell {
         seat: String,
         rung_through_seq: i64,
@@ -802,6 +810,8 @@ impl Op {
             Self::PendingList => "pending_list",
             Self::Approve { .. } => "approve",
             Self::AuditLog { .. } => "audit_log",
+            Self::Freeze { .. } => "freeze",
+            Self::Unfreeze => "unfreeze",
             Self::DaemonRecordDoorbell { .. } => "daemon_record_doorbell",
             Self::DaemonEscalate { .. } => "daemon_escalate",
         }

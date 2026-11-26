@@ -911,3 +911,36 @@ fn a_stuck_doorbell_escalates_to_the_supervisor_once_and_stays_undelivered() {
     assert_eq!(escalations(&mut store), 1, "deduplicated to one notice");
     assert_eq!(store.list_undelivered_inbox(&team_id, "zcode1").unwrap().len(), 1);
 }
+
+#[test]
+fn freeze_stops_new_work_until_unfreeze_and_only_supervisor_or_human_may_freeze() {
+    let dir = tempdir().unwrap();
+    let mut store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+    let team_id = init_review_team(&mut store);
+    let freeze = |reason: &str| RequestEnvelope::new(Op::Freeze { reason: reason.to_string() });
+
+    let denied = store.apply(&seat_actor("zcode1"), freeze("stop")).unwrap_err();
+    assert!(matches!(denied, Error::PermissionDenied(_)), "{denied}");
+    assert!(store.apply(&human(), freeze("  ")).is_err(), "a freeze needs a reason");
+
+    store.apply(&seat_actor("super"), freeze("importer wiped the lake")).unwrap();
+    let team = store.resolve_team(Some(&team_id)).unwrap();
+    assert!(team.paused_at.is_some());
+    assert_eq!(team.paused_reason.as_deref(), Some("importer wiped the lake"));
+    let notices = store.list_undelivered_inbox(&team_id, "zcode1").unwrap();
+    assert!(notices.iter().any(|i| i.kind == InboxKind::Notice && i.subject.starts_with("Team frozen")));
+
+    let refused = store
+        .apply(&seat_actor("super"), RequestEnvelope::new(task_create_op("new work", vec![], Some("zcode1"), None)))
+        .unwrap_err();
+    assert!(refused.to_string().contains("importer wiped the lake"), "{refused}");
+    let refused = store.apply(&seat_actor("super"), RequestEnvelope::new(spawn_prepare_op("zcode2", Some("go"), None))).unwrap_err();
+    assert!(refused.to_string().contains("team is frozen"), "{refused}");
+    // Planning without starting work still works.
+    store.apply(&seat_actor("super"), RequestEnvelope::new(task_create_op("later", vec![], None, None))).unwrap();
+
+    store.apply(&human(), RequestEnvelope::new(Op::Unfreeze)).unwrap();
+    let team = store.resolve_team(Some(&team_id)).unwrap();
+    assert!(team.paused_at.is_none() && team.paused_reason.is_none());
+    store.apply(&seat_actor("super"), RequestEnvelope::new(spawn_prepare_op("zcode2", Some("go"), None))).unwrap();
+}

@@ -177,6 +177,7 @@ fn exec_init(
 }
 
 fn exec_team_op(conn: &Connection, team_id: &str, actor: &Actor, now: &str, op: Op) -> Result<OpOutcome> {
+    refuse_if_frozen(conn, team_id, &op)?;
     match op {
         Op::Init { .. } => Err(Error::validation("Init handled at top level")),
         Op::Status => Ok(OpOutcome::simple(team_id, Some(team_id.to_string()), ReceiptData::TeamStatus(Box::new(build_team_projection(conn, team_id)?)))),
@@ -303,6 +304,8 @@ fn exec_team_op(conn: &Connection, team_id: &str, actor: &Actor, now: &str, op: 
         Op::PendingList => Ok(OpOutcome::simple(team_id, None, ReceiptData::Gates(list_gates(conn, team_id, Some(GateStatus::Pending))?))),
         Op::Approve { gate_id, resolution } => exec_approve(conn, team_id, actor, now, &gate_id, resolution.as_deref()),
         Op::AuditLog { limit } => Ok(OpOutcome::simple(team_id, None, ReceiptData::Audit(list_audit(conn, team_id, limit)?))),
+        Op::Freeze { reason } => exec_freeze(conn, team_id, actor, now, Some(&reason)),
+        Op::Unfreeze => exec_freeze(conn, team_id, actor, now, None),
         Op::DaemonRecordDoorbell { seat, rung_through_seq, outcome } => exec_daemon_record_doorbell(conn, team_id, now, &seat, rung_through_seq, outcome),
         Op::DaemonEscalate { seat, dispatch_id, stop_reason, detail } => exec_daemon_escalate(conn, team_id, now, &seat, dispatch_id.as_deref(), &stop_reason, &detail),
     }
@@ -906,4 +909,65 @@ fn exec_daemon_escalate(conn: &Connection, team_id: &str, now: &str, seat_ref: &
 
     write_inbox(conn, team_id, &supervisor, &seat.name, InboxKind::Escalation, &seat.seat_id, &format!("Seat '{}' escalated ({stop_reason})", seat.name), detail, now)?;
     Ok(OpOutcome::simple(team_id, Some(seat.seat_id.clone()), ReceiptData::Seat(Box::new(seat))))
+}
+
+/// While a team is frozen, nothing may start new work: no spawns, claims, or assignments.
+/// Reads, `ask`, `reply`, `done`, and `verdict` still work so seats can report and wind down.
+fn refuse_if_frozen(conn: &Connection, team_id: &str, op: &Op) -> Result<()> {
+    let starts_work = matches!(op, Op::SpawnPrepare { .. } | Op::TaskClaim { .. } | Op::TaskAssign { .. })
+        || matches!(op, Op::TaskCreate { assign: Some(_), .. });
+    if !starts_work {
+        return Ok(());
+    }
+    let frozen: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT paused_at, paused_reason FROM teams WHERE team_id = ?1 AND paused_at IS NOT NULL",
+            params![team_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    match frozen {
+        Some((at, reason)) => Err(Error::validation(format!(
+            "team is frozen since {at}: {}. No new work starts until the supervisor runs `orcherd unfreeze`",
+            reason.as_deref().unwrap_or("no reason given")
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// `Freeze` (with a reason) or `Unfreeze` (`reason: None`). Supervisor or human only.
+/// Every other seat gets a notice; the daemon holds doorbells while the team is frozen.
+fn exec_freeze(conn: &Connection, team_id: &str, actor: &Actor, now: &str, reason: Option<&str>) -> Result<OpOutcome> {
+    let verb = if reason.is_some() { "freeze" } else { "unfreeze" };
+    if let Actor::Seat { seat_name, .. } = actor {
+        let seat = resolve_seat(conn, team_id, seat_name)?;
+        if seat.role != SeatRole::Supervisor {
+            return Err(Error::PermissionDenied(format!("only the supervisor or a human may {verb} the team")));
+        }
+    }
+    let reason = match reason {
+        Some(r) if r.trim().is_empty() => return Err(Error::validation("`freeze` needs a reason")),
+        Some(r) => Some(r.trim()),
+        None => None,
+    };
+    let paused_at = reason.map(|_| now);
+    conn.execute(
+        "UPDATE teams SET paused_at = ?1, paused_reason = ?2, updated_at = ?3 WHERE team_id = ?4",
+        params![paused_at, reason, now, team_id],
+    )?;
+    let (subject, body) = match reason {
+        Some(r) => ("Team frozen: stop and start nothing new".to_string(), format!("{r}\n\nFinish or abandon the current step, then end your turn. New spawns, claims, and assignments are refused until the supervisor runs `orcherd unfreeze`.")),
+        None => ("Team unfrozen: work can resume".to_string(), "The freeze is lifted. Check `orcherd inbox` and continue your task.".to_string()),
+    };
+    for seat in list_seats(conn, team_id, true)? {
+        if seat.name != actor.actor_name() {
+            write_inbox(conn, team_id, &seat.name, actor.actor_name(), InboxKind::Notice, team_id, &subject, &body, now)?;
+        }
+    }
+    Ok(OpOutcome {
+        team_id: team_id.to_string(),
+        ref_id: Some(team_id.to_string()),
+        next: Some(if reason.is_some() { "orcherd unfreeze" } else { "orcherd status" }.to_string()),
+        data: ReceiptData::TeamStatus(Box::new(build_team_projection(conn, team_id)?)),
+    })
 }

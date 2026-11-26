@@ -9,7 +9,7 @@ use orcherd_core::{Actor, Receipt, RequestEnvelope, Store};
 use serde::{Deserialize, Serialize};
 use std::{
     io::{BufRead, BufReader, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -179,4 +179,18 @@ pub fn handle_client_stream(
         let _ = writer.write_all(&bytes);
         let _ = writer.flush();
     }
+}
+
+/// On a machine that a team host reaches with `orcherd tunnel <machine>`, the tunnel's
+/// socket sits at `<state_dir>/control.sock`. Use it when this machine has no team of its
+/// own, so an agent started here by hand reaches the team without extra setup. A local
+/// team, or an explicit `ORCHERD_REMOTE_SOCKET`, takes precedence.
+pub fn tunnel_socket_without_local_team(state_dir: &Path, db_path: &Path) -> Option<PathBuf> {
+    let sock = state_dir.join("control.sock");
+    if !sock.exists() {
+        return None;
+    }
+    let has_local_team = db_path.exists()
+        && Store::open(db_path).is_ok_and(|store| store.resolve_team(None).is_ok());
+    (!has_local_team).then_some(sock)
 }

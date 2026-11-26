@@ -137,7 +137,7 @@ To avoid both Herding v1's brittle pane bindings and Orca's hourly OAuth sign-ou
 
 ## 4. SQLite Schema (`store.sqlite3`)
 
-Opened with `PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;`. Versioned via `PRAGMA user_version = 1`. Any binary seeing `user_version > SCHEMA_VERSION` returns `Error::SchemaTooNew { found, supported }` without writing.
+Opened with `PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;`. Versioned via `PRAGMA user_version` (currently 2; v2 adds `teams.paused_reason`, the reason `orcherd freeze` records and every refused caller sees). Migrations are additive and run on open. Any binary seeing `user_version > SCHEMA_VERSION` returns `Error::SchemaTooNew { found, supported }` without writing.
 
 ```sql
 CREATE TABLE teams (
@@ -149,6 +149,7 @@ CREATE TABLE teams (
     bootstrap_symlinks  TEXT NOT NULL DEFAULT '[]',
     bootstrap_copies    TEXT NOT NULL DEFAULT '[]',
     paused_at           TEXT,
+    paused_reason       TEXT,          -- v2: why the team is frozen
     created_at          TEXT NOT NULL,
     updated_at          TEXT NOT NULL
 );
@@ -424,8 +425,11 @@ Instead of maintaining a forked GPUI window, `orcherd` renders inside the offici
    - **Board state** (team, seats, task DAG, pending gates, unread counts): the mod runs `orcherd status --json` with `exec()` every 5 s, from the shown space's folder, so the panel follows the repo in view (no `--team` resolves to the team whose `workspace_root` contains the working directory). `status` and every other pure query (`seat list|show`, `task list|show`, `gate list`, `bulletin list`, `finding list`, `pending`, `log`, `inbox --peek`) are **read-only**: `apply` writes no audit row for them, so polling never floods the audit log. Polling pauses while the window is not presented.
    - **Live seat status**: `orcherd spawn` labels every seat terminal `orcherd.team`, `orcherd.seat`, and `orcherd.role`. The mod matches those labels in the app's live `terminals()` (falling back to the seat's recorded `core` address), so working/blocked/idle dots update without polling.
    - `orcherd daemon` still publishes `TeamProjection` via `doc.set { name: "orcherd/team/<team_id>" }` for other `herdr-core` clients; the app's mod API cannot read core documents, so the mod does not depend on it.
+   - **Bulletin**: the latest posts from `orcherd bulletin list --json` (read-only, not audited), newest first.
 2. **Surfaces** (`mod.json`: `"place": "right"`, `"size": 340`):
    - **Right-hand panel**: team name, goal, and working/blocked/gate pills; a **Needs a decision** section for pending `ask` and approval gates (with the exact `orcherd reply` / `orcherd approve` command); seats sorted supervisor → reviewer → planner → worker with role badge, live status dot, current task title, and unread count (click a live seat to `terminal.peek` it); tasks grouped blocked → review → in progress → assigned → ready → waiting on deps → failed, with completed tasks folded.
+   - **Freeze**: a banner with the freeze reason while the team is frozen, and a header button that runs `orcherd freeze` / `orcherd unfreeze` as the human (it arms on the first click and fires on a second within 4 s).
+   - **Seat tabs**: `orcherd spawn` labels each local seat terminal `herdr.space=<id>`, copied from the caller's terminal (`$HC_TERMINAL_ID`), else the supervisor's, so the app opens the seat as its own tab in that space. `--no-ui` leaves it headless; seats `--on` another machine stay headless because space ids are machine-local.
    - **Notifications**: a toast once per newly pending gate (escalations as warnings); clicking it opens the board.
    - **Command palette**: `Orcherd: team board` (`mod.open`) and `Orcherd: refresh board` (`orcherd.refresh`).
 3. **Install & migration**: `orcherd mod install` writes `mod.json`, `main.js`, and `icon.svg`, deletes leftover `mod.toml` / `main.luau`, and removes the retired Luau mod at `~/.config/herdr/gpui-mods/orcherd/` (third-party `herdr-gpui`) only when it holds nothing but files orcherd installed.
@@ -442,6 +446,8 @@ Setup & Skills:
   orcherd status [--team <team>] [--json]
   orcherd skills list | get [orcherd] [--reference <path>] | install [--json]
   orcherd mod install [--path <mods_dir>] [--json]
+  orcherd freeze (--reason <text> | --reason-file <path>) [--json]   # supervisor or human
+  orcherd unfreeze [--json]
   orcherd daemon [start|stop|status] [--json]
   orcherd tunnel <machine> [--remote-socket <path>] [--ssh-arg <arg>...] [--json]
 

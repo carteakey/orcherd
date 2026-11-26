@@ -130,6 +130,7 @@ pub(crate) fn map_team(row: &Row<'_>) -> rusqlite::Result<Team> {
         bootstrap_symlinks: serde_json::from_str(&symlinks_json).unwrap_or_default(),
         bootstrap_copies: serde_json::from_str(&copies_json).unwrap_or_default(),
         paused_at: row.get("paused_at")?,
+        paused_reason: row.get("paused_reason")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })

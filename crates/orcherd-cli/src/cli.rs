@@ -6,7 +6,7 @@ use crate::{
         handle_inbox, handle_log, handle_reply, handle_seat, handle_send, handle_task,
         handle_verdict,
     },
-    daemon,
+    daemon, herdr_space,
     identity::{resolve_actor, resolve_db_path, resolve_state_dir, resolve_team_arg},
     mod_install,
     output::{format_receipt, print_value, subcommand_help},
@@ -67,6 +67,8 @@ Bulletin, Findings & Governance:
   pending     List pending human approval requests (seat removal / role handoff)
   approve     Approve a pending human approval gate (<gate_id>)
   log         Inspect the append-only audit log (--limit <n>)
+  freeze      Stop the whole team now: refuse new work, interrupt busy seats (--reason)
+  unfreeze    Lift a freeze and ring every seat to resume
 
 Global Options:
   --json                Output machine-readable JSON
@@ -133,6 +135,8 @@ pub fn run_from_args(raw_args: Vec<String>) -> Result<i32, String> {
         "finding" => handle_finding(rest, &global),
         "pending" => execute_op(Op::PendingList, &global),
         "approve" => handle_approve(rest, &global),
+        "freeze" => crate::freeze::handle_freeze(rest, &global),
+        "unfreeze" => crate::freeze::handle_unfreeze(rest, &global),
         "log" => handle_log(rest, &global),
         other => Err(format!(
             "unknown command `{other}`; run `orcherd --help` for usage"
@@ -536,6 +540,7 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
     let mut retry_of = None;
     let mut explicit_terminal = None;
     let mut no_launch = false;
+    let mut no_ui = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -610,6 +615,7 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
                 explicit_terminal = Some(req_val(args, i, "--terminal")?.to_owned());
             }
             "--no-launch" => no_launch = true,
+            "--no-ui" => no_ui = true,
             "--environment" => {
                 i += 1;
                 let env_val = req_val(args, i, "--environment")?;
@@ -780,6 +786,12 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
                     labels.insert("orcherd.team", team.team_id.as_str());
                     labels.insert("orcherd.seat", seat_name_cloned.as_str());
                     labels.insert("orcherd.role", seat_role_str.as_str());
+                    let space = (!no_ui)
+                        .then(|| herdr_space::inherited_space(&core, &store, &team.team_id, machine.as_deref()))
+                        .flatten();
+                    if let Some(ref space) = space {
+                        labels.insert(herdr_space::SPACE_LABEL, space.as_str());
+                    }
 
                     let argv = build_agent_argv(
                         &seat_agent_cloned,
@@ -905,7 +917,7 @@ pub fn run_op_raw(op: Op, global: &GlobalFlags) -> Result<Receipt, String> {
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
-        .or_else(|| tunnel_socket_without_local_team(&state_dir, &db_path));
+        .or_else(|| remote::tunnel_socket_without_local_team(&state_dir, &db_path));
     if let Some(sock) = remote_sock {
         let actor = resolve_actor(None, team_ref.as_deref(), global.act_as.as_deref());
         let machine = env::var("ORCHERD_MACHINE").ok();
@@ -926,20 +938,6 @@ pub fn run_op_raw(op: Op, global: &GlobalFlags) -> Result<Receipt, String> {
     };
     let actor = resolve_actor(Some(&store), team_ref.as_deref(), global.act_as.as_deref());
     store.apply(&actor, envelope).map_err(|e| e.to_string())
-}
-
-/// On a machine that a team host reaches with `orcherd tunnel <machine>`, the tunnel's
-/// socket sits at `<state_dir>/control.sock`. Use it when this machine has no team of its
-/// own, so an agent started here by hand reaches the team without extra setup. A local
-/// team, or an explicit `ORCHERD_REMOTE_SOCKET`, takes precedence.
-fn tunnel_socket_without_local_team(state_dir: &Path, db_path: &Path) -> Option<PathBuf> {
-    let sock = state_dir.join("control.sock");
-    if !sock.exists() {
-        return None;
-    }
-    let has_local_team = db_path.exists()
-        && Store::open(db_path).is_ok_and(|store| store.resolve_team(None).is_ok());
-    (!has_local_team).then_some(sock)
 }
 
 pub(crate) fn execute_op(op: Op, global: &GlobalFlags) -> Result<i32, String> {

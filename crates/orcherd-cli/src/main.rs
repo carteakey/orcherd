@@ -15,6 +15,8 @@ macro_rules! out {
 pub mod board;
 pub mod cli;
 pub mod daemon;
+pub mod freeze;
+pub mod herdr_space;
 pub mod identity;
 pub mod mod_install;
 pub mod output;
