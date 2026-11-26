@@ -30,6 +30,7 @@ orcherd/
 ├── README.md                                  # Overview & quickstart
 ├── SPEC.md                                    # Locked v1.0 architecture, schema, CLI, cross-machine & mod spec
 ├── docs/
+│   ├── COMPARISON.md                          # Side-by-side comparison: Herding Teams vs. Orca vs. Orcherd
 │   └── ORIGIN-AND-LESSONS.md                  # Scar tissue from Herding v1 & Orca distilled into 6 design laws
 ├── skills/
 │   └── orcherd/
@@ -70,4 +71,4 @@ orcherd inbox
 orcherd reply G-01 --body-file answers/hud-yes.md
 ```
 
-See [`SPEC.md`](SPEC.md) for the complete wire, schema, and runtime specification.
+See [`SPEC.md`](SPEC.md) for the complete wire, schema, and runtime specification, and [`docs/COMPARISON.md`](docs/COMPARISON.md) for a side-by-side comparison of Herding Teams, Orca Orchestration, and Orcherd.
