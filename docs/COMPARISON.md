@@ -107,10 +107,10 @@ flowchart LR
   5. `builder-a` completes Task 1 via `orcherd done --result-file` (auto-transitioning Task 1 to `review` and waking `gauntlet`); self-review via `orcherd verdict --as builder-a` is refused by the reviewer blindness invariant; `gauntlet` posts `orcherd verdict --verdict pass`.
   6. Task 1 transitions to `completed`, Task 2 automatically unblocks from `pending` to `ready`, and `orcherd log` records the complete 16-event append-only audit trail.
 
-### Remaining Live `herdr-core` (`hc`) Integration Polish
-To make live terminal spawning turnkey on hosts migrating from Herdr 1 to `herdr-core`:
-1. **Install `herdr-core` (`hc`) on `PATH`** and auto-start both `herdr-core` (`orcherd_hc::start::start`) and `orcherd daemon` (`daemon::start_detached`) from `orcherd init` / `orcherd spawn` (or surface `failed_stage` when `hc` is unreachable).
-2. **Wait for `orcherd_hc::agent::ready`** on cold seat launches and auto-spawn `orcherd tunnel <machine>` when `--on <machine>` is passed.
-3. **Wire `core.kill(&terminal)`** into `orcherd seat stop` and `orcherd seat release`.
-4. **Verify `orcherd_hc::reply::agent_in_front`** against `herdr-core` before warm seat reuse and doorbell sends.
-5. **Connect `mods/orcherd/main.luau`** to the `orcherd/team/<id>` document projection published by `orcherd daemon` so the UI mod displays Orcherd seat roles, task titles, and pending gates.
+### `SPEC.md` Review Gaps Closed (`2a8e0f2`)
+All five runtime integration items identified during the initial `SPEC.md` audit are now implemented and verified:
+1. **Auto-start `orcherd daemon` & `herdr-core` on `init` / `spawn`**: `orcherd init` and `orcherd spawn` ensure the detached doorbell daemon is running and surface explicit `failed_stage` / `next` diagnostics when `herdr-core` cannot be reached.
+2. **Readiness check (`agent::ready`) & auto-tunnel on `--on <machine>`**: Cold seat launches wait for readiness and automatically establish the reverse SSH socket tunnel for remote `hc` machines.
+3. **Terminal termination on `seat stop` / `seat release`**: Calls `core.kill(&terminal)` on `herdr-core` in addition to settling the SQLite dispatch record.
+4. **Foreground liveness verification (`reply::agent_in_front`)**: Verifies the agent process is still in the foreground of its `herdr-core` terminal before warm seat reuse and doorbell sends.
+5. **Enriched Luau UI Mod (`mods/orcherd/main.luau`) & Default Harnesses**: Template worker and studio reviewer seats default to `antigravity` (`director`/`super`/`vicesuper` on `claude`, `planner` on `opencode`), and `main.luau` renders live Orcherd seat, gate, and task status.
