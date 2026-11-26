@@ -42,6 +42,7 @@ pub fn apply(store: &mut Store, actor: &Actor, envelope: RequestEnvelope) -> Res
     let now = now_iso();
     let caller_id = actor.caller_id();
     let op_name = envelope.op.name();
+    let read_only = envelope.op.is_read_only();
 
     let payload_hash = if let Some(req_id) = envelope.request_id.as_deref() {
         let hash = sha256_hex(&serde_json::to_vec(&envelope.op)?);
@@ -80,7 +81,9 @@ pub fn apply(store: &mut Store, actor: &Actor, envelope: RequestEnvelope) -> Res
         }
     };
 
-    write_audit(&tx, &outcome.team_id, actor, op_name, outcome.ref_id.as_deref(), "{}", &now)?;
+    if !read_only {
+        write_audit(&tx, &outcome.team_id, actor, op_name, outcome.ref_id.as_deref(), "{}", &now)?;
+    }
 
     let receipt = Receipt {
         request_id: envelope.request_id.clone(),

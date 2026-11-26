@@ -50,7 +50,7 @@ flowchart TB
     end
 
     subgraph UI["Herdr App UI Layer (Zero Fork Maintenance)"]
-        Mod["Herdr UI Mod (mods/orcherd/)\nStatus Bar · Right Panel · Activity Bar App"]
+        Mod["Herdr app mod (mods/orcherd/)\nRight panel · gate toasts · palette"]
     end
 
     Sup & Rev & Wrk1 -->|"in-process SQLite"| CLI
@@ -72,7 +72,7 @@ flowchart TB
 | `crates/orcherd-hc` | Framed JSON-RPC client for unmodified `herdr-core` (`hc`): endpoint discovery (`HC_SOCKET`, `XDG_RUNTIME_DIR/herdr-core/<session>.sock`), `core.start`, `terminal.run`, `terminal.send` (`only_if: Some("idle")`), `terminal.wait`, `terminal.list`, `terminal.label`, `terminal.kill`, `events.subscribe`, `doc.get`/`doc.set`, and readiness-checked agent launch (`agent::launch`, `reply::when_free`). | `serde`, `serde_json`, `toml`, `thiserror`, `tracing`, `rustix` (unix) |
 | `crates/orcherd-cli` | `orcherd` binary: CLI argument parsing, environment caller resolution, git worktree manager & `.orcherd.toml` symlink/copy bootstrapper, embedded `skills get`/`install`, `orcherd daemon` delivery & escalation worker, and `orcherd tunnel` per-machine SSH socket forwarder. | `orcherd-core`, `orcherd-hc`, `clap`, `toml` |
 | `skills/orcherd` | Static discovery stub (`SKILL.md`), bundled base guide (`GUIDE.md`), and progressive disclosure `references/*.md` compiled into `orcherd-cli` via `include_str!`. | Markdown only |
-| `mods/orcherd` | Sandboxed Luau UI mod (`mod.toml`, `main.luau`, `icon.svg`) for Herdr UI (`status_bar`, `panel`, and `activity` bar app). | Luau (`@herdr/ui`) |
+| `mods/orcherd` | Herdr desktop app mod (`mod.json`, `main.js`, `icon.svg`): right-hand team board, gate toasts, palette commands. | JavaScript (gpui-kit, `herdr-app`) |
 
 ---
 
@@ -414,17 +414,19 @@ sequenceDiagram
 
 ---
 
-## 7. Declarative Herdr UI Mod (`mods/orcherd/`)
+## 7. Herdr Desktop App Mod (`mods/orcherd/`)
 
-Instead of maintaining a forked GPUI window, `orcherd` renders inside Herdr UI (and upstream Sheprd) as a **sandboxed Luau mod** (`~/.config/herdr/gpui-mods/orcherd/`), installed via `orcherd mod install`:
+Instead of maintaining a forked GPUI window, `orcherd` renders inside the official Herdr desktop app ([`herdr-app`](https://github.com/herdrdev/herdr-app)) as a **JavaScript mod** in `~/.config/herdr-app/mods/orcherd/` (`$HERDR_APP_HOME/mods/` when set), installed via `orcherd mod install`. Herdr app mods are trusted gpui-kit JavaScript, hot-reloaded on save and validated with `herdr-app check <mod folder>`. The authoritative API is the `herdr.d.ts` / `gpui-kit.d.ts` the app rewrites into its home on every start.
 
-1. **Data Path from `orcherd` to the Mod**:
-   - `orcherd daemon` publishes the live `TeamProjection` JSON document into `herdr-core` on every mutation via `doc.set { name: "orcherd/team/<team_id>", value, version }` and sets `orcherd.*` labels on every managed terminal.
-   - The mod watches `{ "hosts", "workspaces", "agents", "focus" }` (and `orcherd` state snapshots) and renders three surfaces from a single `main.luau`:
-2. **Three UI Surfaces**:
-   - **Status Bar Badge (`places = ["status_bar"]`)**: Compact pill showing active/working seats and an `attention`-toned badge whenever a seat is `blocked` on an auth/permission prompt or a decision gate (`ask`) is pending.
-   - **Right-Hand Mod Panel (`places = ["panel"]`, title = `"Orcherd Crew"`)**: Sits beside the terminal panes like OpenCode's sidebar. Shows each seat in the focused workspace, its role badge (`super`, `review`, `worker`), current task title, and status (`working`, `blocked`, `idle`, `done`), plus a one-click filter for active/blocked seats.
-   - **Activity Bar App (`[activity]`, title = `"Orcherd"`, `icon = "icon.svg"`)**: Full-window dashboard showing host connectivity, seat utilization meter, the active roster across machines, and quick palette actions (`orcherd: Toggle active/blocked seats filter`, `orcherd: Refresh Orcherd board snapshot`).
+1. **Data path from `orcherd` to the mod**:
+   - **Board state** (team, seats, task DAG, pending gates, unread counts): the mod runs `orcherd status --json` with `exec()` every 5 s, from the shown space's folder, so the panel follows the repo in view (no `--team` resolves to the team whose `workspace_root` contains the working directory). `status` and every other pure query (`seat list|show`, `task list|show`, `gate list`, `bulletin list`, `finding list`, `pending`, `log`, `inbox --peek`) are **read-only**: `apply` writes no audit row for them, so polling never floods the audit log. Polling pauses while the window is not presented.
+   - **Live seat status**: `orcherd spawn` labels every seat terminal `orcherd.team`, `orcherd.seat`, and `orcherd.role`. The mod matches those labels in the app's live `terminals()` (falling back to the seat's recorded `core` address), so working/blocked/idle dots update without polling.
+   - `orcherd daemon` still publishes `TeamProjection` via `doc.set { name: "orcherd/team/<team_id>" }` for other `herdr-core` clients; the app's mod API cannot read core documents, so the mod does not depend on it.
+2. **Surfaces** (`mod.json`: `"place": "right"`, `"size": 340`):
+   - **Right-hand panel**: team name, goal, and working/blocked/gate pills; a **Needs a decision** section for pending `ask` and approval gates (with the exact `orcherd reply` / `orcherd approve` command); seats sorted supervisor → reviewer → planner → worker with role badge, live status dot, current task title, and unread count (click a live seat to `terminal.peek` it); tasks grouped blocked → review → in progress → assigned → ready → waiting on deps → failed, with completed tasks folded.
+   - **Notifications**: a toast once per newly pending gate (escalations as warnings); clicking it opens the board.
+   - **Command palette**: `Orcherd: team board` (`mod.open`) and `Orcherd: refresh board` (`orcherd.refresh`).
+3. **Install & migration**: `orcherd mod install` writes `mod.json`, `main.js`, and `icon.svg`, deletes leftover `mod.toml` / `main.luau`, and removes the retired Luau mod at `~/.config/herdr/gpui-mods/orcherd/` (third-party `herdr-gpui`) only when it holds nothing but files orcherd installed.
 
 ---
 

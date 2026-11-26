@@ -806,6 +806,25 @@ impl Op {
             Self::DaemonEscalate { .. } => "daemon_escalate",
         }
     }
+
+    /// Pure queries: they change no records, so `apply` writes no audit row for them.
+    /// UI mods poll `status`, and auditing every poll would bury real mutations.
+    pub const fn is_read_only(&self) -> bool {
+        matches!(
+            self,
+            Self::Status
+                | Self::SeatList { .. }
+                | Self::SeatShow { .. }
+                | Self::TaskList { .. }
+                | Self::TaskShow { .. }
+                | Self::GateList { .. }
+                | Self::BulletinList { .. }
+                | Self::FindingList
+                | Self::PendingList
+                | Self::AuditLog { .. }
+                | Self::InboxRead { peek: true, .. }
+        )
+    }
 }
 
 /// Envelope wrapping an `Op` with optional team target and idempotency key.

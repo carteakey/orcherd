@@ -29,7 +29,7 @@
 | **Task Board & QA** | Flat task list; manual review routing | Hub-and-spoke mail only; no board or DAGs | **Task DAGs (`--deps`) + Enforced Blind Review (`reviewer != assignee`)** |
 | **Worktree Setup** | Manual `git worktree add` + manual symlinks | `--worktree new-child`, manual `.env`/`.venv` symlinks | **Declarative `.orcherd.toml`** auto-symlinks `.env`, `.venv`, `node_modules`, `work/` |
 | **Skill Sync** | Static on-disk markdown (drifts from binary) | Compiled-in `skills get` stub | **Compiled-in 2-tier `orcherd skills get`** + 6 progressive `--reference` guides |
-| **UI Integration** | Custom forked Rust views | Custom Electron views | **Zero-fork Luau Herdr UI Mod** (`mods/orcherd/` via `doc.set`) |
+| **UI Integration** | Custom forked Rust views | Custom Electron views | **Zero-fork Herdr app mod** (`mods/orcherd/`, JavaScript, reads `orcherd status --json` + live `hc` labels) |
 
 ---
 
@@ -48,7 +48,7 @@ flowchart TB
         CLI["orcherd CLI\nSingle-transaction apply(&mut Store, &Actor, Op) -> Receipt"]
         DB[("SQLite (WAL)\nteams · seats · tasks · dispatches · gates\nbulletin · findings · inbox · doorbell · receipts · audit")]
         Daemon["orcherd daemon\nevents.subscribe doorbell loop +\nBlocked/Finished auto-escalation + doc.set"]
-        Mod["Herdr UI Mod (mods/orcherd/)\nStatus Bar · Right Panel · Activity App"]
+        Mod["Herdr app mod (mods/orcherd/)\nRight panel · gate toasts · palette"]
     end
 
     Sup & Rev & WrkA -->|"In-process SQLite"| CLI
@@ -57,7 +57,7 @@ flowchart TB
     CLI -->|"Atomic commit"| DB
     Daemon <-->|"PRAGMA data_version & undelivered inbox"| DB
     Daemon -->|"terminal.send { if: 'idle' }\n[Orcherd] You have N unread item(s)..."| Sup & Rev & WrkA & WrkB
-    Daemon -->|"doc.set('orcherd/team/<id>')"| Mod
+    Mod -->|"exec: orcherd status --json (read-only)"| CLI
 ```
 
 ### The Six Design Laws
@@ -80,8 +80,9 @@ cargo install --path crates/orcherd-cli --root ~/.local
 # Install the static discovery stub to ~/.agents/skills/orcherd/SKILL.md
 orcherd skills install
 
-# (Optional) Install the declarative Herdr UI mod to ~/.config/herdr/gpui-mods/orcherd/
+# (Optional) Install the team board mod into the Herdr desktop app (~/.config/herdr-app/mods/orcherd/)
 orcherd mod install
+herdr-app check ~/.config/herdr-app/mods/orcherd
 ```
 
 Verify the bundled version-matched guide at any time:
@@ -202,7 +203,7 @@ Every command supports `--json`, `--team <name|id>`, `--request-id <id>`, and `-
 | **Setup & Skills** | `orcherd init` | Initialize a team (`--name`, `--template`, `--goal`, `--bootstrap-symlink`) |
 | | `orcherd status` | Show team roster, tasks, active dispatches, unread counts, and doorbells |
 | | `orcherd skills` | `list` \| `get [orcherd] [--reference <ref>]` \| `install` |
-| | `orcherd mod install` | Install the sandboxed Luau UI mod (`status_bar`, `panel`, `activity` app) |
+| | `orcherd mod install` | Install the Herdr desktop app mod (right-hand team board, gate toasts, palette commands) |
 | | `orcherd daemon` | `start` \| `stop` \| `status` \| `run [--once]` |
 | | `orcherd tunnel <machine>` | Manage reverse SSH socket forwarding for a remote `hc` machine |
 | **Seats & Dispatches** | `orcherd spawn` | Start or warm-reuse a persistent seat (`--seat`, `--agent`, `--worktree`, `--on`, `--spec-file`, `--resume`) |
@@ -249,9 +250,9 @@ orcherd/
 │           └── parallel-start.md              # Starting 2–4 independent seats in one shell turn
 └── mods/
     └── orcherd/
-        ├── mod.toml                           # Declarative Herdr UI mod manifest (status_bar, panel, activity)
-        ├── main.luau                          # Sandboxed Luau view rendering live Orcherd projections
-        └── icon.svg                           # Shepherd's crook + worktree orchard icon
+        ├── mod.json                           # Herdr app mod manifest (right panel, palette entries)
+        ├── main.js                            # gpui-kit view: seats, task DAG, decision gates, live seat status
+        └── icon.svg                           # Shepherd's crook + worktree orchard icon (tinted)
 ```
 
 ## Verification

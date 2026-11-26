@@ -41,12 +41,23 @@ fn skills_get_and_install_work_without_drift() {
 }
 
 #[test]
-fn mod_install_writes_valid_luau_mod_bundle() {
+fn mod_install_writes_herdr_app_mod_and_clears_luau_leftovers() {
     let tmp = TempDir::new().unwrap();
+    let stale = tmp.path().join("orcherd");
+    fs::create_dir_all(&stale).unwrap();
+    fs::write(stale.join("main.luau"), "-- old").unwrap();
+    fs::write(stale.join("mod.toml"), "name = 'orcherd'").unwrap();
+
     let installed = mod_install::install(Some(tmp.path())).unwrap();
-    assert!(installed.mod_dir.join("mod.toml").is_file());
-    assert!(installed.mod_dir.join("main.luau").is_file());
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(installed.mod_dir.join("mod.json")).unwrap()).unwrap();
+    assert_eq!(manifest["place"], "right");
+    let main = fs::read_to_string(installed.mod_dir.join("main.js")).unwrap();
+    assert!(main.contains("export default class"));
     assert!(installed.mod_dir.join("icon.svg").is_file());
+    assert!(!installed.mod_dir.join("main.luau").exists());
+    assert!(!installed.mod_dir.join("mod.toml").exists());
+    assert_eq!(installed.removed_legacy, None);
 }
 
 #[test]
@@ -121,7 +132,8 @@ fn remote_socket_qualifies_machine_identity_and_applies_ops() {
             &sock_clone,
             &remote_actor,
             RequestEnvelope::new(Op::InboxRead {
-                peek: true,
+                // A non-peek read marks items read, so it is audited.
+                peek: false,
                 seat: None,
                 limit: None,
             })
@@ -298,4 +310,22 @@ fn daemon_notice_auto_escalates_on_blocked_and_unexpected_exit() {
             .iter()
             .any(|i| i.kind == orcherd_core::InboxKind::Escalation && i.body.contains("exited"))
     );
+}
+
+#[test]
+fn antigravity_seats_launch_agy_without_permission_prompts() {
+    use crate::cli::build_agent_argv;
+    assert_eq!(
+        build_agent_argv("antigravity", Some("gemini-4-neon-high"), None),
+        ["agy", "--dangerously-skip-permissions", "--model", "gemini-4-neon-high"]
+    );
+    assert_eq!(
+        build_agent_argv("agy", None, Some("latest")),
+        ["agy", "--dangerously-skip-permissions", "--continue"]
+    );
+    assert_eq!(
+        build_agent_argv("antigravity", None, Some("conv-1")),
+        ["agy", "--dangerously-skip-permissions", "--resume", "conv-1"]
+    );
+    assert_eq!(build_agent_argv("claude", None, Some("latest")), ["claude", "--resume"]);
 }

@@ -797,13 +797,71 @@ fn send_selectors_prefix_resolution_and_seat_lifecycle_ops() {
     assert_eq!(t_ready.status, TaskStatus::Ready);
     assert!(t_ready.assignee_seat.is_none());
 
-    // AuditLog has recorded all operations
+    // AuditLog has recorded every mutation, and none of the reads (seat show, task show).
     let ReceiptData::Audit(audit_rows) = store
-        .apply(&human(), RequestEnvelope::new(Op::AuditLog { limit: Some(5) }))
+        .apply(&human(), RequestEnvelope::new(Op::AuditLog { limit: Some(10) }))
         .expect("audit log")
         .data
     else {
         panic!("expected Audit");
     };
-    assert_eq!(audit_rows.len(), 5);
+    let ops: Vec<&str> = audit_rows.iter().map(|r| r.op.as_str()).collect();
+    assert_eq!(ops, ["init", "send", "spawn_prepare", "seat_abandon"]);
+}
+
+#[test]
+fn read_only_ops_leave_no_audit_rows_and_teams_resolve_by_repo_path() {
+    let dir = tempdir().unwrap();
+    let mut store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+    let team_id = init_review_team(&mut store);
+
+    let audit_len = |store: &mut Store| match store
+        .apply(&human(), RequestEnvelope::new(Op::AuditLog { limit: None }))
+        .unwrap()
+        .data
+    {
+        ReceiptData::Audit(rows) => rows.len(),
+        other => panic!("expected audit rows, got {other:?}"),
+    };
+    let before = audit_len(&mut store);
+    for _ in 0..3 {
+        store
+            .apply(&human(), RequestEnvelope::new(Op::Status))
+            .unwrap();
+    }
+    store
+        .apply(
+            &human(),
+            RequestEnvelope::new(Op::TaskList {
+                status: None,
+                ready_only: false,
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        audit_len(&mut store),
+        before,
+        "polling status/list must not grow the audit log"
+    );
+
+    // Mutations still audit.
+    store
+        .apply(
+            &human(),
+            RequestEnvelope::new(task_create_op("audited", vec![], None, None)),
+        )
+        .unwrap();
+    assert_eq!(audit_len(&mut store), before + 1);
+
+    let inside = std::path::Path::new("/tmp/herding/crates/core");
+    assert_eq!(
+        store.team_for_path(inside).unwrap().as_deref(),
+        Some(team_id.as_str())
+    );
+    assert_eq!(
+        store
+            .team_for_path(std::path::Path::new("/tmp/herding-other"))
+            .unwrap(),
+        None
+    );
 }

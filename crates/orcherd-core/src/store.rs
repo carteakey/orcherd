@@ -67,6 +67,20 @@ impl Store {
         resolve_team(&self.conn, team_ref)
     }
 
+    /// The newest team whose `workspace_root` is `path` or one of its ancestors,
+    /// preferring the deepest root. Lets `--team` default to the current repo's team.
+    pub fn team_for_path(&self, path: &Path) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare("SELECT team_id, workspace_root FROM teams ORDER BY rowid DESC")?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows
+            .into_iter()
+            .filter(|(_, root)| !root.is_empty() && path.starts_with(root))
+            .max_by_key(|(_, root)| root.len())
+            .map(|(id, _)| id))
+    }
+
     /// Build the live `TeamProjection` for `team_id`.
     pub fn team_projection(&self, team_id: &str) -> Result<TeamProjection> {
         build_team_projection(&self.conn, team_id)

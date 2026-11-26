@@ -41,7 +41,7 @@ Setup & Skills:
   init        Initialize a team (--name, --template review-crew|studio-crew|small, --goal)
   status      Show team roster, tasks, dispatches, and pending gates
   skills      Manage bundled progressive skills (list | get [orcherd] [--reference <ref>] | install)
-  mod         Install declarative Herdr UI mod (mod install [--path <mods_dir>])
+  mod         Install the Herdr desktop app mod (mod install [--path <mods_dir>])
   daemon      Manage doorbell & escalation daemon (start | stop | status | run [--once])
   tunnel      Start reverse SSH socket tunnel for a remote machine (tunnel <machine>)
 
@@ -285,13 +285,18 @@ fn handle_mod(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
                 i += 1;
             }
             let installed = mod_install::install(custom_dir.as_deref())
-                .map_err(|e| format!("failed to install Herdr UI mod: {e}"))?;
+                .map_err(|e| format!("failed to install Herdr app mod: {e}"))?;
             print_value(&installed, global.json, |m| {
-                format!(
-                    "Installed Herdr UI mod `{}` to `{}`",
+                let mut out = format!(
+                    "Installed Herdr app mod `{}` to `{}`\nCheck it with: herdr-app check {}",
                     m.name,
+                    m.mod_dir.display(),
                     m.mod_dir.display()
-                )
+                );
+                if let Some(old) = &m.removed_legacy {
+                    out.push_str(&format!("\nRemoved retired Luau mod `{}`", old.display()));
+                }
+                out
             });
             Ok(0)
         }
@@ -850,16 +855,31 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
     Ok(0)
 }
 
-fn build_agent_argv(agent: &str, model: Option<&str>, resume: Option<&str>) -> Vec<String> {
-    let mut argv = vec![agent.to_owned()];
+/// Launch argv for a seat's agent harness.
+///
+/// The seat's agent id is a harness name, not always a binary: `antigravity` ships as `agy`.
+/// Unattended seats run with the harness's no-approval flag, because a permission prompt in a
+/// worker terminal stalls the task until a human answers it.
+pub(crate) fn build_agent_argv(agent: &str, model: Option<&str>, resume: Option<&str>) -> Vec<String> {
+    let resume = resume.filter(|s| !s.is_empty());
+    let mut argv = match agent {
+        "antigravity" | "agy" | "antigravity-cli" | "antigravity_cli" => {
+            vec!["agy".to_owned(), "--dangerously-skip-permissions".to_owned()]
+        }
+        other => vec![other.to_owned()],
+    };
     if let Some(m) = model.filter(|s| !s.is_empty()) {
         argv.push("--model".to_owned());
         argv.push(m.to_owned());
     }
-    if let Some(r) = resume.filter(|s| !s.is_empty()) {
-        argv.push("--resume".to_owned());
-        if r != "latest" {
-            argv.push(r.to_owned());
+    if let Some(r) = resume {
+        if argv[0] == "agy" && r == "latest" {
+            argv.push("--continue".to_owned());
+        } else {
+            argv.push("--resume".to_owned());
+            if r != "latest" {
+                argv.push(r.to_owned());
+            }
         }
     }
     argv
@@ -888,6 +908,16 @@ pub fn run_op_raw(op: Op, global: &GlobalFlags) -> Result<Receipt, String> {
     let db_path = resolve_db_path(&state_dir);
     let mut store =
         Store::open(&db_path).map_err(|e| format!("failed to open `{}`: {e}", db_path.display()))?;
+    // No --team / $ORCHERD_TEAM and no seat identity: use the team rooted at this repo,
+    // so `status` in one repo doesn't report whichever team was created last.
+    let team_ref = match team_ref {
+        Some(t) => Some(t),
+        None if global.act_as.is_none() && env::var_os("ORCHERD_SEAT").is_none() => env::current_dir()
+            .ok()
+            .and_then(|cwd| store.team_for_path(&cwd).ok().flatten())
+            .inspect(|t| envelope.team = Some(t.clone())),
+        None => None,
+    };
     let actor = resolve_actor(Some(&store), team_ref.as_deref(), global.act_as.as_deref());
     store.apply(&actor, envelope).map_err(|e| e.to_string())
 }

@@ -1,0 +1,9 @@
+{
+  "place": "right",
+  "size": 340,
+  "title": "Orcherd",
+  "palette": [
+    { "title": "Orcherd: team board", "command": "mod.open", "args": { "name": "orcherd" }, "words": "orcherd team seats tasks gates crew" },
+    { "title": "Orcherd: refresh board", "command": "orcherd.refresh", "words": "orcherd reload status" }
+  ]
+}
