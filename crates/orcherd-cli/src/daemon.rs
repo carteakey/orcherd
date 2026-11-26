@@ -359,6 +359,13 @@ pub fn run_foreground(once: bool) -> Result<(), String> {
     let state_dir = resolve_state_dir();
     fs::create_dir_all(&state_dir)
         .map_err(|e| format!("failed to create `{}`: {e}", state_dir.display()))?;
+    // One daemon per store: two concurrent `spawn`s can both start one.
+    if let Some(pid) = status(&state_dir).pid.filter(|&pid| pid != std::process::id()) {
+        if once {
+            return Err(format!("orcherd daemon already running (pid {pid}); stop it before `daemon run --once`"));
+        }
+        return Ok(());
+    }
     let lock_path = lock_file_path(&state_dir);
     let _ = fs::write(&lock_path, format!("{}\n", std::process::id()));
 
@@ -516,9 +523,20 @@ fn refresh_remote_listeners(
     }
 }
 
+/// Linux answers from `/proc`; macOS and the BSDs have no `/proc`, so ask `kill -0`,
+/// which checks the pid without signalling it. Without this, macOS never saw a running
+/// daemon: `daemon stop` was a no-op and every `init`/`spawn` started another one.
 #[cfg(unix)]
 fn process_is_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    if Path::new("/proc/self").exists() {
+        return Path::new(&format!("/proc/{pid}")).exists();
+    }
+    new_command("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 #[cfg(not(unix))]
