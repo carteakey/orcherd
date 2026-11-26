@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" width="128" height="128" alt="Orcherd logo" />
+</p>
+
 # Orcherd (`orcherd`)
 
 **Orch**estration + **Herd**r + an **Orchard** of git **worktrees**.
