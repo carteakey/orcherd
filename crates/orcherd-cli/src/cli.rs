@@ -375,6 +375,8 @@ fn handle_tunnel(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
         i += 1;
     }
     let state_dir = resolve_state_dir();
+    // Requests through the tunnel are answered by this host's daemon.
+    daemon::start_detached(&state_dir)?;
     let st = tunnel::spawn_background_tunnel(&state_dir, machine, remote_socket, &ssh_args)?;
     print_value(&st, global.json, |s| {
         format!(
@@ -895,17 +897,21 @@ pub fn run_op_raw(op: Op, global: &GlobalFlags) -> Result<Receipt, String> {
         envelope = envelope.with_request_id(r);
     }
 
-    if let Ok(remote_sock) = env::var("ORCHERD_REMOTE_SOCKET") {
-        let trimmed = remote_sock.trim();
-        if !trimmed.is_empty() {
-            let actor = resolve_actor(None, team_ref.as_deref(), global.act_as.as_deref());
-            let machine = env::var("ORCHERD_MACHINE").ok();
-            return remote::send_remote_request(Path::new(trimmed), &actor, envelope, machine);
-        }
-    }
-
     let state_dir = resolve_state_dir();
     let db_path = resolve_db_path(&state_dir);
+
+    let remote_sock = env::var("ORCHERD_REMOTE_SOCKET")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| tunnel_socket_without_local_team(&state_dir, &db_path));
+    if let Some(sock) = remote_sock {
+        let actor = resolve_actor(None, team_ref.as_deref(), global.act_as.as_deref());
+        let machine = env::var("ORCHERD_MACHINE").ok();
+        return remote::send_remote_request(&sock, &actor, envelope, machine);
+    }
+
     let mut store =
         Store::open(&db_path).map_err(|e| format!("failed to open `{}`: {e}", db_path.display()))?;
     // No --team / $ORCHERD_TEAM and no seat identity: use the team rooted at this repo,
@@ -920,6 +926,20 @@ pub fn run_op_raw(op: Op, global: &GlobalFlags) -> Result<Receipt, String> {
     };
     let actor = resolve_actor(Some(&store), team_ref.as_deref(), global.act_as.as_deref());
     store.apply(&actor, envelope).map_err(|e| e.to_string())
+}
+
+/// On a machine that a team host reaches with `orcherd tunnel <machine>`, the tunnel's
+/// socket sits at `<state_dir>/control.sock`. Use it when this machine has no team of its
+/// own, so an agent started here by hand reaches the team without extra setup. A local
+/// team, or an explicit `ORCHERD_REMOTE_SOCKET`, takes precedence.
+fn tunnel_socket_without_local_team(state_dir: &Path, db_path: &Path) -> Option<PathBuf> {
+    let sock = state_dir.join("control.sock");
+    if !sock.exists() {
+        return None;
+    }
+    let has_local_team = db_path.exists()
+        && Store::open(db_path).is_ok_and(|store| store.resolve_team(None).is_ok());
+    (!has_local_team).then_some(sock)
 }
 
 pub(crate) fn execute_op(op: Op, global: &GlobalFlags) -> Result<i32, String> {

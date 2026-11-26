@@ -99,6 +99,13 @@ pub fn spawn_background_tunnel(
         fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create `{}`: {e}", parent.display()))?;
     }
+    // `ssh -R` connects to the local socket only when a request arrives, and the daemon
+    // listens only on `remote/*.sock` paths that exist. A placeholder file tells the daemon
+    // to bind this machine's socket on its next loop (it replaces the file with a listener).
+    if !local_socket.exists() {
+        fs::write(&local_socket, b"")
+            .map_err(|e| format!("failed to create `{}`: {e}", local_socket.display()))?;
+    }
     let remote_socket = preflight_remote_socket(valid, remote_socket_override, ssh_args)?;
     let forward_spec = format!("{remote_socket}:{}", local_socket.display());
 

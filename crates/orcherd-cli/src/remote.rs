@@ -69,7 +69,8 @@ pub fn send_remote_request(
 
     let mut stream = UnixStream::connect(socket_path).map_err(|e| {
         format!(
-            "failed to connect to remote socket `{}`: {e}",
+            "failed to connect to remote socket `{}`: {e}. The tunnel from the team host is down; \
+             rerun `orcherd tunnel <this machine>` there",
             socket_path.display()
         )
     })?;
@@ -96,6 +97,13 @@ pub fn send_remote_request(
     reader
         .read_line(&mut line)
         .map_err(|e| format!("failed to read reply from `{}`: {e}", socket_path.display()))?;
+    if line.trim().is_empty() {
+        return Err(format!(
+            "no reply through `{}`: the tunnel is up, but no orcherd daemon answered on the team host. \
+             On the team host run `orcherd daemon start`, then `orcherd tunnel <this machine>`",
+            socket_path.display()
+        ));
+    }
     let resp: RemoteResponse = serde_json::from_str(line.trim())
         .map_err(|e| format!("invalid JSON reply from `{}`: {e}", socket_path.display()))?;
 
