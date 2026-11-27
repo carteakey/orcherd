@@ -5,6 +5,7 @@
 //! on `<M>.sock`, the daemon knows which machine the caller belongs to and
 //! qualifies bare `HC_TERMINAL_ID=t7` as `<M>/t7`.
 
+use crate::identity::find_team_in_sibling_stores;
 use orcherd_core::{Actor, Receipt, RequestEnvelope, Store};
 use orcherd_hc::new_command;
 use serde::{Deserialize, Serialize};
@@ -123,18 +124,38 @@ pub fn send_remote_request(
     }
 }
 
-/// Annotates `team not found` errors returned over a tunnel with the answering host and
-/// socket path so remote callers immediately see why a local team wasn't found there.
+/// Annotates `team not found` errors returned over a tunnel with the answering host,
+/// socket path, and any local sibling `orcherd*` store that holds the requested team.
 pub(crate) fn format_remote_error(err: String, host: Option<&str>, socket_path: &Path) -> String {
+    let sibling = err
+        .strip_prefix("team not found: ")
+        .and_then(|team_ref| find_team_in_sibling_stores(team_ref, None));
+    format_remote_error_with_sibling(err, host, socket_path, sibling.as_deref())
+}
+
+pub(crate) fn format_remote_error_with_sibling(
+    err: String,
+    host: Option<&str>,
+    socket_path: &Path,
+    sibling_dir: Option<&Path>,
+) -> String {
     if let Some(rest) = err.strip_prefix("team not found: ") {
         let host = host
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or("remote host");
-        return format!(
-            "team not found on {host} (via the tunnel at {}): {rest}; set ORCHERD_STATE_DIR or --team",
-            socket_path.display()
-        );
+        return match sibling_dir {
+            Some(dir) => format!(
+                "team not found on {host} (via the tunnel at {}): {rest}; {rest} is in {}; run with ORCHERD_STATE_DIR={}",
+                socket_path.display(),
+                dir.display(),
+                dir.display(),
+            ),
+            None => format!(
+                "team not found on {host} (via the tunnel at {}): {rest}; set ORCHERD_STATE_DIR or --team",
+                socket_path.display()
+            ),
+        };
     }
     err
 }

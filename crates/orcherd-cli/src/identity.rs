@@ -4,23 +4,34 @@ use crate::{tunnel, worktree};
 use orcherd_core::{Actor, Address, Store};
 use std::{
     collections::BTreeMap,
-    env,
+    env, fs,
     path::{Path, PathBuf},
 };
 
-/// Default store directory when `ORCHERD_STATE_DIR` is not overridden.
-pub fn default_state_dir() -> PathBuf {
+/// Upper bound on sibling `orcherd*` state directories scanned on a `team not found` error.
+const MAX_SIBLING_STORES: usize = 10;
+
+/// Parent directory holding default and sibling `orcherd*` state directories
+/// (`$XDG_STATE_HOME`, `%LOCALAPPDATA%`, or `~/.local/state`).
+pub fn state_base_dir() -> Option<PathBuf> {
     if let Some(xdg) = env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty()) {
-        return PathBuf::from(xdg).join("orcherd");
+        return Some(PathBuf::from(xdg));
     }
     #[cfg(windows)]
     if let Some(local) = env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()) {
-        return PathBuf::from(local).join("orcherd");
+        return Some(PathBuf::from(local));
     }
-    if let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
-        return PathBuf::from(home).join(".local").join("state").join("orcherd");
-    }
-    PathBuf::from(".orcherd-state")
+    env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .or_else(|| env::var_os("USERPROFILE").filter(|v| !v.is_empty()))
+        .map(|home| PathBuf::from(home).join(".local").join("state"))
+}
+
+/// Default store directory when `ORCHERD_STATE_DIR` is not overridden.
+pub fn default_state_dir() -> PathBuf {
+    state_base_dir()
+        .map(|base| base.join("orcherd"))
+        .unwrap_or_else(|| PathBuf::from(".orcherd-state"))
 }
 
 pub fn resolve_state_dir() -> PathBuf {
@@ -74,6 +85,88 @@ pub(crate) fn build_seat_env(
         env_map.insert("ORCHERD_STATE_DIR", abs.display().to_string());
     }
     env_map
+}
+
+/// Scans up to `MAX_SIBLING_STORES` sibling `orcherd*` state directories (read-only, no
+/// migrations) for a team matching `team_ref`, returning the first directory that holds it.
+pub(crate) fn find_team_in_sibling_stores(
+    team_ref: &str,
+    skip_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(base) = state_base_dir() {
+        roots.push(base);
+    }
+    if let Some(parent) = skip_dir.and_then(Path::parent)
+        && !parent.as_os_str().is_empty()
+        && !roots.iter().any(|r| r == parent)
+    {
+        roots.push(parent.to_path_buf());
+    }
+    find_team_in_siblings_under(team_ref, &roots, skip_dir)
+}
+
+pub(crate) fn find_team_in_siblings_under(
+    team_ref: &str,
+    roots: &[PathBuf],
+    skip_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let query = team_ref.trim();
+    if query.is_empty() || query == "<default>" {
+        return None;
+    }
+    let skip_canon = skip_dir.and_then(|d| fs::canonicalize(d).ok());
+    let mut scanned = 0usize;
+    for root in roots {
+        let Ok(entries) = fs::read_dir(root) else {
+            continue;
+        };
+        let mut dirs: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("orcherd"))
+                    && p.join("store.sqlite3").is_file()
+            })
+            .collect();
+        dirs.sort();
+        for dir in dirs {
+            if skip_dir.is_some_and(|s| s == dir) {
+                continue;
+            }
+            if let Some(ref sc) = skip_canon
+                && fs::canonicalize(&dir).ok().as_ref() == Some(sc)
+            {
+                continue;
+            }
+            if scanned >= MAX_SIBLING_STORES {
+                return None;
+            }
+            scanned += 1;
+            let Ok(store) = Store::open_read_only(dir.join("store.sqlite3")) else {
+                continue;
+            };
+            if store.resolve_team(Some(query)).is_ok() {
+                return Some(dir);
+            }
+        }
+    }
+    None
+}
+
+/// If `err` is a local `team not found: <ref>` error and a sibling `orcherd*` store holds
+/// that team, appends a hint pointing directly at the store and `ORCHERD_STATE_DIR=...`.
+pub(crate) fn annotate_team_not_found(err: String, current_state_dir: &Path) -> String {
+    let Some(team_ref) = err.strip_prefix("team not found: ") else {
+        return err;
+    };
+    let Some(found_dir) = find_team_in_sibling_stores(team_ref, Some(current_state_dir)) else {
+        return err;
+    };
+    let dir = found_dir.display();
+    format!("{err}; {team_ref} is in {dir}; run with ORCHERD_STATE_DIR={dir}")
 }
 
 pub fn resolve_team_arg(explicit: Option<&str>) -> Option<String> {
@@ -227,4 +320,76 @@ pub fn resolve_actor(
     }
 
     Actor::Human { terminal }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orcherd_core::{Op, RequestEnvelope, TemplateKind};
+    use tempfile::TempDir;
+
+    fn seed_team(dir: &Path, name: &str) -> String {
+        let mut store = Store::open(dir.join("store.sqlite3")).unwrap();
+        let human = Actor::Human { terminal: None };
+        store
+            .apply(
+                &human,
+                RequestEnvelope::new(Op::Init {
+                    name: name.to_owned(),
+                    template: Some(TemplateKind::Small),
+                    goal: None,
+                    workspace_root: dir.display().to_string(),
+                    bootstrap_symlinks: Vec::new(),
+                    bootstrap_copies: Vec::new(),
+                }),
+            )
+            .unwrap()
+            .team_id
+    }
+
+    #[test]
+    fn sibling_scan_finds_team_skips_corrupt_and_respects_bound() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+        let default_dir = base.join("orcherd");
+        let corrupt_dir = base.join("orcherd-bad");
+        let somalog_dir = base.join("orcherd-somalog");
+        fs::create_dir_all(&default_dir).unwrap();
+        fs::create_dir_all(&corrupt_dir).unwrap();
+        fs::write(corrupt_dir.join("store.sqlite3"), b"corrupt").unwrap();
+        let _ = Store::open(default_dir.join("store.sqlite3")).unwrap();
+        let team_id = seed_team(&somalog_dir, "somalog");
+
+        let roots = vec![base.to_path_buf()];
+        assert_eq!(
+            find_team_in_siblings_under(&team_id, &roots, Some(&default_dir)),
+            Some(somalog_dir.clone())
+        );
+        assert_eq!(
+            find_team_in_siblings_under("somalog", &roots, Some(&default_dir)),
+            Some(somalog_dir)
+        );
+        assert_eq!(
+            find_team_in_siblings_under("missing-team", &roots, Some(&default_dir)),
+            None
+        );
+        assert_eq!(
+            find_team_in_siblings_under("<default>", &roots, Some(&default_dir)),
+            None
+        );
+
+        // Bound check: more than MAX_SIBLING_STORES empty dirs sorted before `orcherd-zzz`
+        // stops after MAX_SIBLING_STORES without opening `orcherd-zzz`.
+        let bounded = TempDir::new().unwrap();
+        for idx in 0..MAX_SIBLING_STORES {
+            let d = bounded.path().join(format!("orcherd-{idx:02}"));
+            let _ = Store::open(d.join("store.sqlite3")).unwrap();
+        }
+        let beyond = bounded.path().join("orcherd-zzz");
+        let beyond_id = seed_team(&beyond, "beyond");
+        assert_eq!(
+            find_team_in_siblings_under(&beyond_id, &[bounded.path().to_path_buf()], None),
+            None
+        );
+    }
 }

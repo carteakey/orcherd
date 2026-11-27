@@ -9,8 +9,8 @@ use crate::{
     },
     daemon, herdr_space,
     identity::{
-        build_seat_env, default_state_dir, resolve_actor, resolve_db_path, resolve_state_dir,
-        resolve_team_ref,
+        annotate_team_not_found, build_seat_env, default_state_dir, resolve_actor,
+        resolve_db_path, resolve_state_dir, resolve_team_ref,
     },
     mod_install, model_check,
     output::{format_receipt, print_value, subcommand_help},
@@ -599,7 +599,7 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
     let team_ref = resolve_team_ref(global.team.as_deref(), Some(&store))?;
     let team = store
         .resolve_team(team_ref.as_deref())
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| annotate_team_not_found(e.to_string(), &state_dir))?;
     let project_cfg = worktree::load_project_config(Path::new(&team.workspace_root))?;
 
     let wt_spec = WorktreeSpec::parse(&worktree_arg, Some(&seat_name))?;
@@ -930,7 +930,9 @@ pub fn run_op_raw(op: Op, global: &GlobalFlags) -> Result<Receipt, String> {
         envelope = envelope.with_team(t);
     }
     let actor = resolve_actor(Some(&store), team_ref.as_deref(), global.act_as.as_deref());
-    store.apply(&actor, envelope).map_err(|e| e.to_string())
+    store
+        .apply(&actor, envelope)
+        .map_err(|e| annotate_team_not_found(e.to_string(), &state_dir))
 }
 
 pub(crate) fn execute_op(op: Op, global: &GlobalFlags) -> Result<i32, String> {

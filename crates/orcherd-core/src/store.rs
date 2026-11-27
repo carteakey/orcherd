@@ -37,6 +37,25 @@ impl Store {
         Ok(Self { conn })
     }
 
+    /// Open an existing SQLite store strictly read-only without running migrations or creating files.
+    ///
+    /// Fails on missing, corrupt, or newer-schema databases so diagnostic scans never mutate state.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(path.as_ref(), flags)?;
+        conn.pragma_update(None, "query_only", true)?;
+        conn.pragma_update(None, "busy_timeout", 250)?;
+        let version = schema::read_user_version(&conn)?;
+        if version > schema::SCHEMA_VERSION {
+            return Err(Error::SchemaTooNew {
+                found: version,
+                supported: schema::SCHEMA_VERSION,
+            });
+        }
+        Ok(Self { conn })
+    }
+
     /// Open an isolated in-memory SQLite store for unit and integration testing.
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
