@@ -45,7 +45,7 @@ Setup & Skills:
   mod         Install the Herdr desktop app mod (mod install [--path <mods_dir>])
   daemon      Manage doorbell & escalation daemon (start | stop | status | run [--once])
   preflight   Compare the agent binary path and version in hc vs. your shell (--agent <id>)
-  tunnel      Start reverse SSH socket tunnel for a remote machine (tunnel <machine>)
+  tunnel      Start or stop a supervised reverse SSH tunnel (tunnel <machine> [--stop])
 
 Seats & Dispatches:
   spawn       Start or reuse a persistent seat on a task (--seat, --agent, --worktree, --spec-file)
@@ -121,7 +121,7 @@ pub fn run_from_args(raw_args: Vec<String>) -> Result<i32, String> {
         "mod" => handle_mod(rest, &global),
         "daemon" => handle_daemon(rest, &global),
         "preflight" => preflight::handle_preflight(rest, &global),
-        "tunnel" => handle_tunnel(rest, &global),
+        "tunnel" => tunnel::handle_tunnel(rest, &global),
         "init" => handle_init(rest, &global),
         "status" => execute_op(Op::Status, &global),
         "spawn" | "worker-start" => handle_spawn(rest, &global),
@@ -350,51 +350,6 @@ fn handle_daemon(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
             "unknown `daemon` subcommand `{other}`; expected `start`, `stop`, `status`, or `run`"
         )),
     }
-}
-
-fn handle_tunnel(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
-    let machine = args
-        .first()
-        .ok_or_else(|| "`orcherd tunnel <machine>` requires a machine name".to_owned())?;
-    let mut remote_socket = None;
-    let mut ssh_args = Vec::new();
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--remote-socket" => {
-                i += 1;
-                remote_socket = Some(
-                    args.get(i)
-                        .ok_or_else(|| "`--remote-socket` requires a path".to_owned())?
-                        .as_str(),
-                );
-            }
-            "--ssh-arg" => {
-                i += 1;
-                ssh_args.push(
-                    args.get(i)
-                        .ok_or_else(|| "`--ssh-arg` requires an argument".to_owned())?
-                        .clone(),
-                );
-            }
-            other => return Err(format!("unknown `tunnel` option `{other}`")),
-        }
-        i += 1;
-    }
-    let state_dir = resolve_state_dir();
-    // Requests through the tunnel are answered by this host's daemon.
-    daemon::start_detached(&state_dir)?;
-    let st = tunnel::spawn_background_tunnel(&state_dir, machine, remote_socket, &ssh_args)?;
-    print_value(&st, global.json, |s| {
-        format!(
-            "Tunnel active for `{}` (pid {:?}): {} -> {}",
-            s.machine,
-            s.pid,
-            s.remote_socket,
-            s.local_socket.display()
-        )
-    });
-    Ok(0)
 }
 
 fn handle_init(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
@@ -765,7 +720,7 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
             }
         } else if !no_launch {
             if let Some(ref m) = machine {
-                let _ = tunnel::spawn_background_tunnel(&state_dir, m, None, &[]);
+                let _ = tunnel::ensure_background_tunnel(&state_dir, m);
             }
             match core_res {
                 Ok(core) => {

@@ -145,7 +145,7 @@ orcherd tunnel m1                                  # forwards orcherd's socket t
 orcherd spawn --seat m1-builder --on m1 --spec-file brief.md
 ```
 
-Commands the remote seat runs reach your store through the tunnel and are logged as `m1/<terminal>`.
+Commands the remote seat runs reach your store through the tunnel and are logged as `m1/<terminal>`. The daemon watches recorded tunnels and restarts them with backoff if SSH drops (escalating after repeated failures) until you run `orcherd tunnel m1 --stop`.
 
 ## Herdr app board
 

@@ -377,6 +377,16 @@ orcherd preflight — Compare the agent binary path and version in hc vs. your s
 
 Usage: orcherd preflight --agent <id> [--on <hc_machine>] [--json]
 ",
+        "tunnel" => "\
+orcherd tunnel — Start or stop a supervised reverse SSH socket tunnel for a remote machine
+
+Usage:
+  orcherd tunnel <machine> [--remote-socket <path>] [--ssh-arg <arg>...] [--json]
+  orcherd tunnel <machine> --stop [--json]
+
+Recorded tunnels are watched by `orcherd daemon` and restarted automatically with backoff
+if SSH drops; `--stop` kills the tunnel and removes its record so it stays stopped.
+",
         "freeze" | "unfreeze" => "\
 orcherd freeze — Stop the whole team at once (supervisor or human)
 

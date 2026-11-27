@@ -424,6 +424,7 @@ sequenceDiagram
    - `orcherd spawn --on <M>` sets `ORCHERD_REMOTE_SOCKET=<remote_state_dir>/orcherd/control.sock` and `ORCHERD_MACHINE=<M>` in the remote terminal's environment.
    - When the remote worker runs `orcherd inbox`, `orcherd ask`, or `orcherd done`, the CLI reads `--result-file` / `--body-file` on the remote filesystem, serializes a single bounded JSON `RemoteRequest { actor_env, op }` over `$ORCHERD_REMOTE_SOCKET`, and prints the `Receipt`.
    - Because the request arrives on `remote/<M>.sock`, `orcherd daemon` knows the request came from machine `<M>` and qualifies bare `HC_TERMINAL_ID=t7` as `<M>/t7`.
+   - **Daemon tunnel supervision**: `orcherd tunnel <M>` and `orcherd spawn --on <M>` write `<state_dir>/tunnels/<M>.json` (machine, pid, optional remote socket override and SSH args). Every 30 s, `orcherd daemon` checks each recorded tunnel's pid and restarts dead SSH children with exponential backoff (30 s, 1 m, 2 m … capped at 10 min). After 3 consecutive failed restarts, it writes one deduplicated `escalation` (`stop_reason = 'tunnel_down'`, `ref_id = "tunnel:<M>"`) to the supervisor of each team with seats on `<M>`, clearing backoff and escalation state once the tunnel recovers. `orcherd tunnel <M> --stop` kills the SSH child and removes the record so a deliberately stopped tunnel stays stopped.
 
 ---
 
@@ -460,7 +461,7 @@ Setup & Skills:
   orcherd unfreeze [--json]
   orcherd daemon [start|stop|status] [--json]
   orcherd preflight --agent <id> [--on <hc_machine>] [--json]
-  orcherd tunnel <machine> [--remote-socket <path>] [--ssh-arg <arg>...] [--json]
+  orcherd tunnel <machine> [--remote-socket <path>] [--ssh-arg <arg>...] [--stop] [--json]
 
 Seats & Dispatches:
   orcherd spawn --seat <name> [--role <supervisor|reviewer|planner|worker>]

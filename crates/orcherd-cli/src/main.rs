@@ -29,6 +29,7 @@ pub mod self_update;
 pub mod skills;
 pub mod stall;
 pub mod tunnel;
+pub mod tunnel_watch;
 pub mod worktree;
 
 #[cfg(test)]

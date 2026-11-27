@@ -18,9 +18,9 @@ use crate::store::{
 };
 use crate::templates::seed_template_seats;
 use crate::types::{
-    Actor, DispatchState, DoneOutcome, Doorbell, DoorbellOutcome, Gate, GateKind, GateStatus,
-    InboxItem, InboxKind, Op, Receipt, ReceiptData, RequestEnvelope, SeatRole, Task, TaskStatus,
-    TemplateKind, VerdictKind,
+    Actor, Address, DispatchState, DoneOutcome, Doorbell, DoorbellOutcome, Gate, GateKind,
+    GateStatus, InboxItem, InboxKind, Op, Receipt, ReceiptData, RequestEnvelope, SeatRole, Task,
+    TaskStatus, TemplateKind, VerdictKind,
 };
 
 mod supervise;
@@ -917,6 +917,30 @@ fn exec_daemon_escalate(conn: &Connection, team_id: &str, now: &str, seat_ref: &
         )
         .optional()?
     };
+
+    if stop_reason == "tunnel_down" {
+        let machine = match &seat.address {
+            Address::Core { machine: Some(m), .. } => m.as_str(),
+            Address::Core { machine: None, terminal } => {
+                terminal.split_once('/').map_or(seat.name.as_str(), |(m, _)| m)
+            }
+            _ => seat.name.as_str(),
+        };
+        let ref_id = format!("tunnel:{machine}");
+        if seat.role != SeatRole::Supervisor && seat.name != supervisor {
+            write_dedup_escalation_inbox(
+                conn,
+                team_id,
+                &supervisor,
+                &seat.name,
+                &ref_id,
+                &format!("Tunnel to '{machine}' is down"),
+                detail,
+                now,
+            )?;
+        }
+        return Ok(OpOutcome::simple(team_id, Some(ref_id), ReceiptData::Seat(Box::new(seat))));
+    }
 
     if matches!(stop_reason, "blocked" | "stalled") {
         conn.execute(

@@ -547,6 +547,7 @@ pub fn run_foreground(once: bool) -> Result<(), String> {
     let mut last_data_version = -1i64;
     let mut last_tick = Instant::now() - Duration::from_secs(10);
     let mut backoff = RingBackoff::default();
+    let mut tunnels = crate::tunnel_watch::TunnelWatch::default();
     let mut binary = crate::self_update::BinaryWatch::start();
 
     loop {
@@ -593,6 +594,9 @@ pub fn run_foreground(once: bool) -> Result<(), String> {
             }
         }
         if backoff.flush_pending_blocks(&mut store, Instant::now()) > 0 {
+            woke_by_event = true;
+        }
+        if tunnels.tick(&mut store, &state_dir) > 0 {
             woke_by_event = true;
         }
 
@@ -646,7 +650,7 @@ fn active_dispatch_for_seat(proj: &TeamProjection, seat_id: &str) -> Option<Stri
         .map(|d| d.dispatch_id.clone())
 }
 
-fn list_all_team_ids(store: &Store) -> Result<Vec<String>, String> {
+pub(crate) fn list_all_team_ids(store: &Store) -> Result<Vec<String>, String> {
     let mut stmt = store
         .connection()
         .prepare("SELECT team_id FROM teams ORDER BY created_at ASC")
@@ -711,7 +715,7 @@ fn refresh_remote_listeners(
 /// which checks the pid without signalling it. Without this, macOS never saw a running
 /// daemon: `daemon stop` was a no-op and every `init`/`spawn` started another one.
 #[cfg(unix)]
-fn process_is_alive(pid: u32) -> bool {
+pub(crate) fn process_is_alive(pid: u32) -> bool {
     if Path::new("/proc/self").exists() {
         return Path::new(&format!("/proc/{pid}")).exists();
     }
@@ -724,16 +728,16 @@ fn process_is_alive(pid: u32) -> bool {
 }
 
 #[cfg(not(unix))]
-fn process_is_alive(_pid: u32) -> bool {
+pub(crate) fn process_is_alive(_pid: u32) -> bool {
     false
 }
 
 #[cfg(unix)]
-fn terminate_process(pid: u32) {
+pub(crate) fn terminate_process(pid: u32) {
     let _ = new_command("kill")
         .args(["-TERM", &pid.to_string()])
         .status();
 }
 
 #[cfg(not(unix))]
-fn terminate_process(_pid: u32) {}
+pub(crate) fn terminate_process(_pid: u32) {}
