@@ -592,3 +592,315 @@ fn replayed_done_and_verdict_with_same_request_id_return_original_receipt() {
         "a fresh verdict on the completed task must be refused"
     );
 }
+
+#[test]
+fn done_enforces_reviewer_blindness_and_records_assignee_on_unassigned_task() {
+    let (_dir, mut store, _team_id) = team();
+    let ReceiptData::Task(task) = store
+        .apply(
+            &seat("super"),
+            RequestEnvelope::new(Op::TaskCreate {
+                title: Some("Unassigned reviewed task".to_string()),
+                spec: "build it".to_string(),
+                deps: vec![],
+                assign: None,
+                reviewer: Some("vicesuper".to_string()),
+                issue_ref: None,
+                parent_id: None,
+                placement: None,
+            }),
+        )
+        .unwrap()
+        .data
+    else {
+        panic!("expected Task");
+    };
+    assert!(task.assignee_seat.is_none());
+
+    // The reviewer cannot submit `done` on an unassigned task they are reviewing.
+    let self_done = store
+        .apply(
+            &seat("vicesuper"),
+            RequestEnvelope::new(Op::Done {
+                task_id: Some(task.task_id.clone()),
+                result: "built by reviewer".to_string(),
+                branch: None,
+                commit_sha: None,
+                outcome: DoneOutcome::Succeeded,
+            }),
+        )
+        .unwrap_err();
+    assert!(matches!(self_done, Error::ReviewerBlindness { ref seat } if seat == "vicesuper"));
+
+    // Another seat submitting `done` records itself as `assignee_seat`, so it cannot self-verdict.
+    let ReceiptData::DoneResult { task: after_done, .. } = store
+        .apply(
+            &seat("zcode1"),
+            RequestEnvelope::new(Op::Done {
+                task_id: Some(task.task_id.clone()),
+                result: "built by zcode1".to_string(),
+                branch: None,
+                commit_sha: None,
+                outcome: DoneOutcome::Succeeded,
+            }),
+        )
+        .unwrap()
+        .data
+    else {
+        panic!("expected DoneResult");
+    };
+    assert_eq!(after_done.status, TaskStatus::Review);
+    assert_eq!(after_done.assignee_seat.as_deref(), Some("zcode1"));
+
+    let self_verdict = store
+        .apply(
+            &seat("zcode1"),
+            RequestEnvelope::new(Op::Verdict {
+                task_id: task.task_id.clone(),
+                verdict: VerdictKind::Pass,
+                body: "self approve".to_string(),
+            }),
+        )
+        .unwrap_err();
+    assert!(matches!(self_verdict, Error::ReviewerBlindness { ref seat } if seat == "zcode1"));
+
+    // The designated reviewer can still pass it.
+    store
+        .apply(
+            &seat("vicesuper"),
+            RequestEnvelope::new(Op::Verdict {
+                task_id: task.task_id,
+                verdict: VerdictKind::Pass,
+                body: "verified".to_string(),
+            }),
+        )
+        .unwrap();
+}
+
+#[test]
+fn task_update_requires_supervisor_and_respects_freeze() {
+    let (_dir, mut store, _team_id) = team();
+    let task = task_in_review(&mut store);
+    let to_cancel = task_in_review(&mut store);
+
+    // Workers cannot jump task status directly via `task update`.
+    let denied = store
+        .apply(
+            &seat("zcode1"),
+            RequestEnvelope::new(Op::TaskUpdate {
+                task_id: task.task_id.clone(),
+                status: TaskStatus::Completed,
+            }),
+        )
+        .unwrap_err();
+    assert!(matches!(denied, Error::PermissionDenied(_)), "{denied}");
+
+    // Freezing the team refuses `task update` to active/unblocking states even for the supervisor.
+    store
+        .apply(
+            &seat("super"),
+            RequestEnvelope::new(Op::Freeze {
+                reason: "stop everything".to_string(),
+            }),
+        )
+        .unwrap();
+    for blocked_status in [
+        TaskStatus::Assigned,
+        TaskStatus::InProgress,
+        TaskStatus::Completed,
+    ] {
+        let err = store
+            .apply(
+                &seat("super"),
+                RequestEnvelope::new(Op::TaskUpdate {
+                    task_id: task.task_id.clone(),
+                    status: blocked_status,
+                }),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("team is frozen"), "{err}");
+    }
+
+    // Stopping a task (`cancelled`) is still allowed while frozen.
+    store
+        .apply(
+            &seat("super"),
+            RequestEnvelope::new(Op::TaskUpdate {
+                task_id: to_cancel.task_id,
+                status: TaskStatus::Cancelled,
+            }),
+        )
+        .unwrap();
+
+    // After unfreeze, supervisor `task update` to `completed` works again.
+    store.apply(&seat("super"), RequestEnvelope::new(Op::Unfreeze)).unwrap();
+    let ReceiptData::Task(done) = store
+        .apply(
+            &seat("super"),
+            RequestEnvelope::new(Op::TaskUpdate {
+                task_id: task.task_id,
+                status: TaskStatus::Completed,
+            }),
+        )
+        .unwrap()
+        .data
+    else {
+        panic!("expected Task");
+    };
+    assert_eq!(done.status, TaskStatus::Completed);
+}
+
+#[test]
+fn task_assign_skips_inbox_while_pending_and_assign_spawn_refuse_finished_tasks() {
+    let (_dir, mut store, team_id) = team();
+    let ReceiptData::Task(dep) = store
+        .apply(
+            &seat("super"),
+            RequestEnvelope::new(Op::TaskCreate {
+                title: Some("Prereq".to_string()),
+                spec: "first".to_string(),
+                deps: vec![],
+                assign: None,
+                reviewer: None,
+                issue_ref: None,
+                parent_id: None,
+                placement: None,
+            }),
+        )
+        .unwrap()
+        .data
+    else {
+        panic!("expected Task");
+    };
+    let ReceiptData::Task(child) = store
+        .apply(
+            &seat("super"),
+            RequestEnvelope::new(Op::TaskCreate {
+                title: Some("Dependent".to_string()),
+                spec: "second".to_string(),
+                deps: vec![dep.task_id.clone()],
+                assign: None,
+                reviewer: None,
+                issue_ref: None,
+                parent_id: None,
+                placement: None,
+            }),
+        )
+        .unwrap()
+        .data
+    else {
+        panic!("expected Task");
+    };
+    assert_eq!(child.status, TaskStatus::Pending);
+
+    // Assigning a `pending` task records the assignee without ringing them early.
+    let ReceiptData::Task(assigned_child) = store
+        .apply(
+            &seat("super"),
+            RequestEnvelope::new(Op::TaskAssign {
+                task_id: child.task_id.clone(),
+                to_seat: "zcode2".to_string(),
+                reviewer: None,
+                spec: None,
+            }),
+        )
+        .unwrap()
+        .data
+    else {
+        panic!("expected Task");
+    };
+    assert_eq!(assigned_child.status, TaskStatus::Pending);
+    assert_eq!(assigned_child.assignee_seat.as_deref(), Some("zcode2"));
+    assert!(
+        unread(&store, &team_id, "zcode2").is_empty(),
+        "assignee must not be rung while prerequisites are unfinished"
+    );
+
+    // Completing the prerequisite unblocks `child` and writes one `Assigned` inbox item.
+    store
+        .apply(
+            &seat("super"),
+            RequestEnvelope::new(Op::TaskUpdate {
+                task_id: dep.task_id.clone(),
+                status: TaskStatus::Completed,
+            }),
+        )
+        .unwrap();
+    let z2_items: Vec<_> = unread(&store, &team_id, "zcode2")
+        .into_iter()
+        .filter(|i| i.kind == InboxKind::Assigned && i.ref_id == child.task_id)
+        .collect();
+    assert_eq!(z2_items.len(), 1, "expected exactly one Assigned item on unblock: {z2_items:?}");
+
+    // Finished tasks (`completed`, `failed`, `cancelled`) refuse both `task assign` and `spawn --task`.
+    for terminal in [
+        TaskStatus::Completed,
+        TaskStatus::Failed,
+        TaskStatus::Cancelled,
+    ] {
+        let t = task_in_review(&mut store);
+        store
+            .apply(
+                &seat("super"),
+                RequestEnvelope::new(Op::TaskUpdate {
+                    task_id: t.task_id.clone(),
+                    status: terminal,
+                }),
+            )
+            .unwrap();
+
+        let assign_err = store
+            .apply(
+                &seat("super"),
+                RequestEnvelope::new(Op::TaskAssign {
+                    task_id: t.task_id.clone(),
+                    to_seat: "zcode2".to_string(),
+                    reviewer: None,
+                    spec: None,
+                }),
+            )
+            .unwrap_err();
+        let assign_msg = assign_err.to_string();
+        assert!(
+            assign_msg.contains(terminal.as_str()) && assign_msg.contains("task reopen"),
+            "{assign_msg}"
+        );
+
+        let spawn_err = store
+            .apply(
+                &seat("super"),
+                RequestEnvelope::new(Op::SpawnPrepare {
+                    seat: "zcode2".to_string(),
+                    role: None,
+                    agent: None,
+                    model: None,
+                    account: None,
+                    effort: None,
+                    worktree_path: None,
+                    branch: None,
+                    machine: None,
+                    task_id: Some(t.task_id.clone()),
+                    spec: None,
+                    title: None,
+                    keep_open: None,
+                    resume_session: None,
+                    retry_of: None,
+                }),
+            )
+            .unwrap_err();
+        let spawn_msg = spawn_err.to_string();
+        assert!(
+            spawn_msg.contains(terminal.as_str()) && spawn_msg.contains("task reopen"),
+            "{spawn_msg}"
+        );
+
+        let ReceiptData::Task(unchanged) = store
+            .apply(&human(), RequestEnvelope::new(Op::TaskShow { task_id: t.task_id }))
+            .unwrap()
+            .data
+        else {
+            panic!("expected Task");
+        };
+        assert_eq!(unchanged.status, terminal);
+    }
+}

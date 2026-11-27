@@ -130,7 +130,7 @@ To avoid both Herding v1's brittle pane bindings and Orca's hourly OAuth sign-ou
   - If `reviewer_seat` is `Some(rev)`, the task moves to `review` and writes an inbox row (`review_requested`) for `rev` (plus a status notice for `supervisor`).
 
 ### 3.4 Turn Outcomes & Decision Gates (`done`, `ask`, `reply`, `verdict`)
-- **Terminal task guard**: `done`, `verdict`, and `ask <task_id>` are refused on `completed`, `failed`, or `cancelled` tasks (replayed requests with the same `--request-id` still return their original receipt); only `task reopen` moves a finished task back.
+- **Terminal task guard**: `done`, `verdict`, `ask <task_id>`, `task assign`, and `spawn --task` are refused on `completed`, `failed`, or `cancelled` tasks (replayed requests with the same `--request-id` still return their original receipt); only `task reopen` moves a finished task back.
 - **`orcherd ask [<task_id>] --question "<text>" [--body-file <path>]`**:
   - Creates a `pending` row in `gates` (`kind = 'question'`), marks the task `blocked`, and writes an urgent `question` item to the Supervisor's `inbox`. The worker ends its turn.
 - **`orcherd reply <gate_id|item_id> --body-file <path>`**:

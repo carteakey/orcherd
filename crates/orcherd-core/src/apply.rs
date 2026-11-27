@@ -19,12 +19,15 @@ use crate::store::{
 use crate::templates::seed_template_seats;
 use crate::types::{
     Actor, Address, DispatchState, DoneOutcome, Doorbell, DoorbellOutcome, Gate, GateKind,
-    GateStatus, InboxItem, InboxKind, Op, Receipt, ReceiptData, RequestEnvelope, SeatRole, Task,
+    GateStatus, InboxItem, InboxKind, Op, Receipt, ReceiptData, RequestEnvelope, SeatRole,
     TaskStatus, TemplateKind, VerdictKind,
 };
 
 mod supervise;
-use supervise::{exec_freeze, exec_seat_brief, exec_task_reopen, refuse_if_frozen};
+use supervise::{
+    exec_freeze, exec_seat_brief, exec_task_reopen, exec_task_update, refuse_if_finished,
+    refuse_if_frozen,
+};
 
 struct OpOutcome {
     team_id: String,
@@ -265,16 +268,7 @@ fn exec_team_op(conn: &Connection, team_id: &str, actor: &Actor, now: &str, op: 
         }
         Op::TaskAssign { task_id, to_seat, reviewer, spec } => exec_task_assign(conn, team_id, actor, now, &task_id, &to_seat, reviewer.as_deref(), spec.as_deref()),
         Op::TaskClaim { task_id } => exec_task_claim(conn, team_id, actor, now, &task_id),
-        Op::TaskUpdate { task_id, status } => {
-            let task = resolve_task(conn, team_id, &task_id)?;
-            let completed_at = if status == TaskStatus::Completed { Some(now) } else { task.completed_at.as_deref() };
-            conn.execute("UPDATE tasks SET status = ?1, completed_at = ?2, updated_at = ?3 WHERE task_id = ?4", params![status.as_str(), completed_at, now, task.task_id])?;
-            if status == TaskStatus::Completed {
-                let _ = unblock_ready_dag_tasks(conn, team_id, actor, now)?;
-            }
-            let updated = resolve_task(conn, team_id, &task.task_id)?;
-            Ok(OpOutcome::simple(team_id, Some(updated.task_id.clone()), ReceiptData::Task(Box::new(updated))))
-        }
+        Op::TaskUpdate { task_id, status } => exec_task_update(conn, team_id, actor, now, &task_id, status),
         Op::InboxRead { peek, seat, limit } => exec_inbox_read(conn, team_id, actor, now, peek, seat.as_deref(), limit),
         Op::Send { to, subject, body } => {
             let recipients = resolve_send_recipients(conn, team_id, actor.actor_name(), &to)?;
@@ -367,6 +361,7 @@ fn exec_spawn_prepare(conn: &Connection, team_id: &str, actor: &Actor, now: &str
 
     let task_record = if let Some(tid) = task_id.as_deref() {
         let task = resolve_task(conn, team_id, tid)?;
+        refuse_if_finished(&task, "spawn")?;
         if let Some(rev) = task.reviewer_seat.as_deref() {
             check_reviewer_blindness(conn, team_id, &seat_record.name, rev)?;
         }
@@ -376,6 +371,7 @@ fn exec_spawn_prepare(conn: &Connection, team_id: &str, actor: &Actor, now: &str
         Some(resolve_task(conn, team_id, &task.task_id)?)
     } else if let Some(prev) = &prev_dispatch {
         let task = resolve_task(conn, team_id, &prev.task_id)?;
+        refuse_if_finished(&task, "spawn")?;
         if let Some(rev) = task.reviewer_seat.as_deref() {
             check_reviewer_blindness(conn, team_id, &seat_record.name, rev)?;
         }
@@ -518,6 +514,7 @@ fn exec_task_create(conn: &Connection, team_id: &str, actor: &Actor, now: &str, 
 #[allow(clippy::too_many_arguments)]
 fn exec_task_assign(conn: &Connection, team_id: &str, actor: &Actor, now: &str, task_ref: &str, to_seat: &str, reviewer: Option<&str>, spec: Option<&str>) -> Result<OpOutcome> {
     let task = resolve_task(conn, team_id, task_ref)?;
+    refuse_if_finished(&task, "task assign")?;
     let clean_to = to_seat.trim().trim_start_matches('@');
     if clean_to.is_empty() {
         return Err(Error::validation("assignee seat must not be empty"));
@@ -535,7 +532,11 @@ fn exec_task_assign(conn: &Connection, team_id: &str, actor: &Actor, now: &str, 
         "UPDATE tasks SET assignee_seat = ?1, reviewer_seat = ?2, spec = ?3, status = ?4, updated_at = ?5 WHERE task_id = ?6",
         params![clean_to, effective_reviewer, new_spec, new_status.as_str(), now, task.task_id],
     )?;
-    write_inbox(conn, team_id, clean_to, actor.actor_name(), InboxKind::Assigned, &task.task_id, &task.title, new_spec, now)?;
+    // Pending tasks wait on unfinished deps; `unblock_ready_dag_tasks` will notify
+    // the assignee once prerequisites complete (matching `exec_task_create`).
+    if new_status != TaskStatus::Pending {
+        write_inbox(conn, team_id, clean_to, actor.actor_name(), InboxKind::Assigned, &task.task_id, &task.title, new_spec, now)?;
+    }
     let updated = resolve_task(conn, team_id, &task.task_id)?;
     Ok(OpOutcome::simple(team_id, Some(updated.task_id.clone()), ReceiptData::Task(Box::new(updated))))
 }
@@ -584,32 +585,6 @@ fn exec_inbox_read(conn: &Connection, team_id: &str, actor: &Actor, now: &str, p
         }
     }
     Ok(OpOutcome::simple(team_id, Some(target_seat), ReceiptData::Inbox(items)))
-}
-
-/// Refuses turn outcomes (`done`, `verdict`, `ask`) on a finished task so a late or
-/// crossed message cannot silently reopen it; only a supervisor can with `task reopen`.
-fn refuse_if_finished(task: &Task, action: &str) -> Result<()> {
-    if !matches!(
-        task.status,
-        TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
-    ) {
-        return Ok(());
-    }
-    let hint = if action == "ask" {
-        format!(
-            "omit the task id to `orcherd ask` the supervisor without modifying it, or have the supervisor run `orcherd task reopen {}`",
-            task.task_id
-        )
-    } else {
-        format!(
-            "use `orcherd ask` to message the supervisor, or have the supervisor run `orcherd task reopen {}`",
-            task.task_id
-        )
-    };
-    Err(Error::validation(format!(
-        "cannot `{action}` task '{}': status is already {}; {hint}",
-        task.task_id, task.status
-    )))
 }
 
 fn exec_ask(conn: &Connection, team_id: &str, actor: &Actor, now: &str, task_ref: Option<&str>, question: &str, body: Option<&str>) -> Result<OpOutcome> {
@@ -685,6 +660,9 @@ fn exec_done(
             .ok_or_else(|| Error::not_found("task", actor.actor_name()))?
     };
     refuse_if_finished(&task, "done")?;
+    if let Some(rev) = task.reviewer_seat.as_deref() {
+        check_reviewer_blindness(conn, team_id, actor.actor_name(), rev)?;
+    }
 
     let settled_dispatch = if let Ok(seat) = resolve_seat(conn, team_id, actor.actor_name()) {
         if let Some(disp) = find_active_dispatch_for_seat(conn, team_id, &seat.seat_id, Some(&task.task_id))? {
@@ -706,18 +684,18 @@ fn exec_done(
 
     match outcome {
         DoneOutcome::Failed => {
-            conn.execute("UPDATE tasks SET status = 'failed', result = ?1, branch = COALESCE(?2, branch), commit_sha = COALESCE(?3, commit_sha), updated_at = ?4 WHERE task_id = ?5", params![result, branch, commit_sha, now, task.task_id])?;
+            conn.execute("UPDATE tasks SET status = 'failed', assignee_seat = COALESCE(assignee_seat, ?1), result = ?2, branch = COALESCE(?3, branch), commit_sha = COALESCE(?4, commit_sha), updated_at = ?5 WHERE task_id = ?6", params![actor.actor_name(), result, branch, commit_sha, now, task.task_id])?;
             write_inbox(conn, team_id, &supervisor, actor.actor_name(), InboxKind::WorkerDone, &task.task_id, &format!("Task failed: {}", task.title), result, now)?;
         }
         DoneOutcome::Succeeded => {
             if let Some(reviewer) = task.reviewer_seat.as_deref() {
-                conn.execute("UPDATE tasks SET status = 'review', result = ?1, branch = COALESCE(?2, branch), commit_sha = COALESCE(?3, commit_sha), updated_at = ?4 WHERE task_id = ?5", params![result, branch, commit_sha, now, task.task_id])?;
+                conn.execute("UPDATE tasks SET status = 'review', assignee_seat = COALESCE(assignee_seat, ?1), result = ?2, branch = COALESCE(?3, branch), commit_sha = COALESCE(?4, commit_sha), updated_at = ?5 WHERE task_id = ?6", params![actor.actor_name(), result, branch, commit_sha, now, task.task_id])?;
                 write_inbox(conn, team_id, reviewer, actor.actor_name(), InboxKind::ReviewRequested, &task.task_id, &format!("Review requested: {}", task.title), result, now)?;
                 if reviewer != supervisor {
                     write_inbox(conn, team_id, &supervisor, actor.actor_name(), InboxKind::Notice, &task.task_id, &format!("Task in review ({reviewer}): {}", task.title), result, now)?;
                 }
             } else {
-                conn.execute("UPDATE tasks SET status = 'completed', result = ?1, branch = COALESCE(?2, branch), commit_sha = COALESCE(?3, commit_sha), completed_at = ?4, updated_at = ?4 WHERE task_id = ?5", params![result, branch, commit_sha, now, task.task_id])?;
+                conn.execute("UPDATE tasks SET status = 'completed', assignee_seat = COALESCE(assignee_seat, ?1), result = ?2, branch = COALESCE(?3, branch), commit_sha = COALESCE(?4, commit_sha), completed_at = ?5, updated_at = ?5 WHERE task_id = ?6", params![actor.actor_name(), result, branch, commit_sha, now, task.task_id])?;
                 write_inbox(conn, team_id, &supervisor, actor.actor_name(), InboxKind::WorkerDone, &task.task_id, &format!("Task completed: {}", task.title), result, now)?;
                 unblocked_task_ids = unblock_ready_dag_tasks(conn, team_id, actor, now)?;
             }

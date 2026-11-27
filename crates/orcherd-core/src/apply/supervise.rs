@@ -5,11 +5,14 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use super::OpOutcome;
 use crate::error::{Error, Result};
-use crate::store::{build_team_projection, list_seats, resolve_seat, resolve_task, write_inbox};
-use crate::types::{Actor, InboxKind, Op, ReceiptData, SeatRole, TaskStatus};
+use crate::store::{
+    build_team_projection, list_seats, resolve_seat, resolve_task, unblock_ready_dag_tasks,
+    write_inbox,
+};
+use crate::types::{Actor, InboxKind, Op, ReceiptData, SeatRole, Task, TaskStatus};
 
 /// Supervisor seats and humans may steer the team; other seats may not.
-fn require_supervisor(conn: &Connection, team_id: &str, actor: &Actor, what: &str) -> Result<()> {
+pub(super) fn require_supervisor(conn: &Connection, team_id: &str, actor: &Actor, what: &str) -> Result<()> {
     if let Actor::Seat { seat_name, .. } = actor
         && resolve_seat(conn, team_id, seat_name)?.role != SeatRole::Supervisor
     {
@@ -18,11 +21,50 @@ fn require_supervisor(conn: &Connection, team_id: &str, actor: &Actor, what: &st
     Ok(())
 }
 
+/// Refuses mutations (`done`, `verdict`, `ask`, `task assign`, `spawn`) on a finished
+/// task so it cannot be silently reopened; only a supervisor can with `task reopen`.
+pub(super) fn refuse_if_finished(task: &Task, action: &str) -> Result<()> {
+    if !matches!(
+        task.status,
+        TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+    ) {
+        return Ok(());
+    }
+    let hint = match action {
+        "ask" => format!(
+            "omit the task id to `orcherd ask` the supervisor without modifying it, or have the supervisor run `orcherd task reopen {}`",
+            task.task_id
+        ),
+        "spawn" | "task assign" => format!(
+            "run `orcherd task reopen {}` first if another round is needed",
+            task.task_id
+        ),
+        _ => format!(
+            "use `orcherd ask` to message the supervisor, or have the supervisor run `orcherd task reopen {}`",
+            task.task_id
+        ),
+    };
+    Err(Error::validation(format!(
+        "cannot `{action}` task '{}': status is already {}; {hint}",
+        task.task_id, task.status
+    )))
+}
+
 /// While a team is frozen, nothing may start new work: no spawns, claims, or assignments.
 /// Reads, `ask`, `reply`, `done`, and `verdict` still work so seats can report and wind down.
 pub(super) fn refuse_if_frozen(conn: &Connection, team_id: &str, op: &Op) -> Result<()> {
-    let starts_work = matches!(op, Op::SpawnPrepare { .. } | Op::TaskClaim { .. } | Op::TaskAssign { .. } | Op::TaskReopen { .. })
-        || matches!(op, Op::TaskCreate { assign: Some(_), .. });
+    let starts_work = matches!(
+        op,
+        Op::SpawnPrepare { .. }
+            | Op::TaskClaim { .. }
+            | Op::TaskAssign { .. }
+            | Op::TaskReopen { .. }
+            | Op::TaskCreate { assign: Some(_), .. }
+            | Op::TaskUpdate {
+                status: TaskStatus::Assigned | TaskStatus::InProgress | TaskStatus::Completed,
+                ..
+            }
+    );
     if !starts_work {
         return Ok(());
     }
@@ -40,6 +82,38 @@ pub(super) fn refuse_if_frozen(conn: &Connection, team_id: &str, op: &Op) -> Res
         ))),
         None => Ok(()),
     }
+}
+
+/// Moves a task's status directly. Supervisor or human only: workers settle tasks
+/// through `done` (so blind review runs) rather than setting status directly.
+pub(super) fn exec_task_update(
+    conn: &Connection,
+    team_id: &str,
+    actor: &Actor,
+    now: &str,
+    task_id: &str,
+    status: TaskStatus,
+) -> Result<OpOutcome> {
+    require_supervisor(conn, team_id, actor, "update task status")?;
+    let task = resolve_task(conn, team_id, task_id)?;
+    let completed_at = if status == TaskStatus::Completed {
+        Some(now)
+    } else {
+        task.completed_at.as_deref()
+    };
+    conn.execute(
+        "UPDATE tasks SET status = ?1, completed_at = ?2, updated_at = ?3 WHERE task_id = ?4",
+        params![status.as_str(), completed_at, now, task.task_id],
+    )?;
+    if status == TaskStatus::Completed {
+        let _ = unblock_ready_dag_tasks(conn, team_id, actor, now)?;
+    }
+    let updated = resolve_task(conn, team_id, &task.task_id)?;
+    Ok(OpOutcome::simple(
+        team_id,
+        Some(updated.task_id.clone()),
+        ReceiptData::Task(Box::new(updated)),
+    ))
 }
 
 /// `Freeze` (with a reason) or `Unfreeze` (`reason: None`). Supervisor or human only.
