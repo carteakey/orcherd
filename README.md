@@ -179,7 +179,7 @@ Every command takes `--json`, `--team`, `--as <seat>`, and `--request-id` (safe 
 | `bulletin …`, `finding …` | Team-wide posts; durable evidence records |
 | `pending`, `approve` | Human approvals for roster changes |
 | `freeze`, `unfreeze` | Stop the whole team now (notify all, interrupt busy seats, refuse new work); resume |
-| `daemon …`, `tunnel` | Doorbells and escalations; remote machines |
+| `daemon …`, `preflight`, `tunnel` | Doorbells and escalations; check `hc` vs. shell agent PATH/version; remote machines |
 | `skills …`, `mod install` | Agent guide (`skills get orcherd`); the Herdr app board |
 
 Agents load the full guide, matched to the binary's version, with `orcherd skills get orcherd`.

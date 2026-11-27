@@ -9,9 +9,9 @@ use crate::{
     },
     daemon, herdr_space,
     identity::{resolve_actor, resolve_db_path, resolve_state_dir, resolve_team_ref},
-    mod_install,
+    mod_install, model_check,
     output::{format_receipt, print_value, subcommand_help},
-    remote, skills, tunnel,
+    preflight, remote, skills, tunnel,
     worktree::{self, WorktreeSpec},
 };
 use orcherd_core::{
@@ -44,6 +44,7 @@ Setup & Skills:
   skills      Manage bundled progressive skills (list | get [orcherd] [--reference <ref>] | install)
   mod         Install the Herdr desktop app mod (mod install [--path <mods_dir>])
   daemon      Manage doorbell & escalation daemon (start | stop | status | run [--once])
+  preflight   Compare the agent binary path and version in hc vs. your shell (--agent <id>)
   tunnel      Start reverse SSH socket tunnel for a remote machine (tunnel <machine>)
 
 Seats & Dispatches:
@@ -119,6 +120,7 @@ pub fn run_from_args(raw_args: Vec<String>) -> Result<i32, String> {
         "skills" | "skill" => handle_skills(rest, &global),
         "mod" => handle_mod(rest, &global),
         "daemon" => handle_daemon(rest, &global),
+        "preflight" => preflight::handle_preflight(rest, &global),
         "tunnel" => handle_tunnel(rest, &global),
         "init" => handle_init(rest, &global),
         "status" => execute_op(Op::Status, &global),
@@ -722,6 +724,7 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
     }
 
     let mut receipt = store.apply(&actor, env_req).map_err(|e| e.to_string())?;
+    let mut spawn_model_check = None;
 
     if let ReceiptData::SpawnPrepared {
         ref seat,
@@ -819,29 +822,49 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
                                 stop: &stop_flag,
                             };
                             let _ = agent::ready(&core, &terminal.address, until);
-                            let bound = store.apply(
-                                &actor,
-                                RequestEnvelope::new(Op::SpawnBindAddress {
-                                    seat: seat_name_cloned.clone(),
-                                    dispatch_id,
-                                    address: Address::Core {
-                                        machine,
-                                        terminal: terminal.address.clone(),
-                                    },
-                                    worktree_path: Some(cwd_str),
-                                    branch: prepared_wt.branch,
-                                    resume_session,
-                                })
-                                .with_team(&team.team_id),
-                            );
-                            if let Err(err) = bound {
-                                receipt.failed_stage = Some("bind_address".to_owned());
-                                receipt.next = Some(format!(
-                                    "terminal {} started but couldn't be recorded ({err}); bind it with `orcherd spawn --seat {seat_name_cloned} --terminal {}`",
-                                    terminal.address, terminal.address
-                                ));
+                            let check = seat_model_cloned
+                                .as_deref()
+                                .filter(|m| !m.is_empty())
+                                .map(|requested| {
+                                    model_check::verify_launched_model(
+                                        &core,
+                                        &terminal.address,
+                                        &seat_agent_cloned,
+                                        requested,
+                                    )
+                                });
+                            let mismatch = check.as_ref().is_some_and(|c| {
+                                c.status == orcherd_core::ModelCheckStatus::Mismatch
+                            });
+                            spawn_model_check =
+                                check.map(|c| (terminal.address.clone(), seat_agent_cloned.clone(), c));
+                            if mismatch {
+                                let _ = core.kill(&terminal.address);
+                            } else {
+                                let bound = store.apply(
+                                    &actor,
+                                    RequestEnvelope::new(Op::SpawnBindAddress {
+                                        seat: seat_name_cloned.clone(),
+                                        dispatch_id,
+                                        address: Address::Core {
+                                            machine,
+                                            terminal: terminal.address.clone(),
+                                        },
+                                        worktree_path: Some(cwd_str),
+                                        branch: prepared_wt.branch,
+                                        resume_session,
+                                    })
+                                    .with_team(&team.team_id),
+                                );
+                                if let Err(err) = bound {
+                                    receipt.failed_stage = Some("bind_address".to_owned());
+                                    receipt.next = Some(format!(
+                                        "terminal {} started but couldn't be recorded ({err}); bind it with `orcherd spawn --seat {seat_name_cloned} --terminal {}`",
+                                        terminal.address, terminal.address
+                                    ));
+                                }
+                                let _ = daemon::tick_once(&mut store, Some(&core), &mut daemon::RingBackoff::default());
                             }
-                            let _ = daemon::tick_once(&mut store, Some(&core), &mut daemon::RingBackoff::default());
                         }
                         Err(err) => {
                             receipt.failed_stage = Some("terminal_run".to_owned());
@@ -859,6 +882,10 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
                 }
             }
         }
+    }
+
+    if let Some((term_addr, seat_agent, check)) = spawn_model_check {
+        let _ = model_check::apply_model_check(&mut receipt, &term_addr, &seat_agent, check);
     }
 
     // The receipt is printed only after the terminal is bound, and always carries the seat

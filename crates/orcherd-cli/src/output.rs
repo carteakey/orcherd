@@ -1,6 +1,6 @@
 //! Human-readable and `--json` formatting for `Receipt` and CLI commands.
 
-use orcherd_core::{Receipt, ReceiptData};
+use orcherd_core::{ModelCheckStatus, Receipt, ReceiptData};
 use serde::Serialize;
 use std::io::{self, Write as _};
 
@@ -74,11 +74,30 @@ pub fn format_receipt(receipt: &Receipt, json: bool) -> String {
             task,
             dispatch,
             warm_reuse,
+            model_check,
         } => {
             out.push_str(&format!(
                 "Seat `{}` ({}) [warm_reuse={warm_reuse}] address={}\n",
                 seat.name, seat.role, seat.address
             ));
+            if let Some(check) = model_check {
+                match check.status {
+                    ModelCheckStatus::Verified => out.push_str(&format!(
+                        "Model: {} (verified: {})\n",
+                        check.requested,
+                        check.observed.as_deref().unwrap_or("-")
+                    )),
+                    ModelCheckStatus::Mismatch => out.push_str(&format!(
+                        "Model: {} (MISMATCH: {})\n",
+                        check.requested,
+                        check.observed.as_deref().unwrap_or("-")
+                    )),
+                    ModelCheckStatus::Unverified => out.push_str(&format!(
+                        "Model: {} (unverified)\n",
+                        check.requested
+                    )),
+                }
+            }
             if let Some(t) = task {
                 out.push_str(&format!("Task: {} [{}] {}\n", t.task_id, t.status, t.title));
             }
@@ -352,6 +371,11 @@ Usage:
   orcherd skills list [--json]
   orcherd skills get [orcherd] [--reference references/<file>.md] [--full] [--json]
   orcherd skills install [--path <dir>] [--json]
+",
+        "preflight" => "\
+orcherd preflight — Compare the agent binary path and version in hc vs. your shell
+
+Usage: orcherd preflight --agent <id> [--on <hc_machine>] [--json]
 ",
         "freeze" | "unfreeze" => "\
 orcherd freeze — Stop the whole team at once (supervisor or human)

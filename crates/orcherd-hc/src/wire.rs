@@ -245,3 +245,16 @@ pub enum WaitReason {
     #[serde(other)]
     Other,
 }
+
+/// Rendered terminal screen plus optional history from `terminal.read`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadScreen {
+    #[serde(default)]
+    pub complete: bool,
+    #[serde(default)]
+    pub how: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub why: Option<String>,
+}

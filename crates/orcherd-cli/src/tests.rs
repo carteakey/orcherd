@@ -641,3 +641,227 @@ fn team_resolution_precedence_and_project_config_git_boundary() {
         None
     );
 }
+
+#[test]
+fn model_matcher_handles_display_names_and_rejects_mismatches() {
+    use crate::model_check::{extract_observed_model, model_matches};
+
+    // Positive matches
+    assert!(model_matches("gemini-4-neon-high", "Gemini 4 Neon (High)"));
+    assert!(model_matches("gemini-4-neon-high", "Gemini 4 Neon · high"));
+    assert!(model_matches("gemini-4-neon", "Gemini 4 Neon (High)"));
+    assert!(model_matches("gemini-2.5-pro", "Gemini 2.5 Pro"));
+    assert!(model_matches("claude-opus-4-6", "Claude Opus 4.6"));
+    assert!(model_matches("claude-opus-4-6", "Opus 4.6"));
+    assert!(model_matches("claude-sonnet-4-5-20250929", "Sonnet 4.5"));
+    assert!(model_matches("opus", "Claude Opus 4.6"));
+    assert!(model_matches("gpt-5.4", "GPT-5.4 (High)"));
+    assert!(model_matches("gpt-5.4-high", "gpt-5.4 high"));
+
+    // Negative mismatches
+    assert!(!model_matches("gemini-4-neon-high", "Claude Opus 5.5"));
+    assert!(!model_matches("gemini-4-neon-high", "Gemini 4 Neon (Low)"));
+    assert!(!model_matches("gemini-4-neon-high", "Gemini 4 Flash (High)"));
+    assert!(!model_matches("claude-opus-4-6", "Claude Sonnet 4.6"));
+    assert!(!model_matches("claude-opus-4-6", "Claude Opus 4.5"));
+    assert!(!model_matches("gpt-5.4", "GPT-5.3"));
+
+    // Compact agy header (with ANSI color codes)
+    let compact = "\x1b[1mAntigravity CLI 1.5.17 · Gemini 4 Neon (High)\x1b[0m\n> ";
+    let obs = extract_observed_model("antigravity", compact).unwrap();
+    assert_eq!(obs.model, "Gemini 4 Neon (High)");
+    assert_eq!(obs.line, "Antigravity CLI 1.5.17 · Gemini 4 Neon (High)");
+
+    // Multi-line agy ASCII logo banner
+    let banner = "\
+      ▄▀▀▄        Antigravity CLI 1.5.18
+     ▀▀▀▀▀▀       user@example.com (Google AI Ultra)
+    ▀▀▀▀▀▀▀▀      Gemini 4 Neon (High)
+   ▄▀▀    ▀▀▄     ~/repos/orcherd
+";
+    let obs = extract_observed_model("agy", banner).unwrap();
+    assert_eq!(obs.model, "Gemini 4 Neon (High)");
+    assert_eq!(obs.line, "Antigravity CLI 1.5.18 · Gemini 4 Neon (High)");
+
+    // agy footer status bar fallback
+    let footer = "  Press up to edit queued messages          auto · Gemini 4 Neon · high\n";
+    let obs = extract_observed_model("antigravity", footer).unwrap();
+    assert!(model_matches("gemini-4-neon-high", &obs.model));
+
+    // Transient startup/auth/status lines beneath the banner must NOT be misparsed as models.
+    assert!(
+        extract_observed_model(
+            "antigravity",
+            "Antigravity CLI 1.5.18\nYou are not logged into Antigravity\n"
+        )
+        .is_none()
+    );
+    assert!(extract_observed_model("antigravity", "Antigravity CLI 1.5.18\nLoading...\n").is_none());
+    assert!(
+        extract_observed_model("antigravity", "Antigravity CLI 1.5.18\nSign in required\n")
+            .is_none()
+    );
+    assert!(
+        extract_observed_model("antigravity", "Antigravity CLI 1.5.18\nUpdate available\n")
+            .is_none()
+    );
+
+    // Unrecognisable screen and other harnesses return None.
+    assert!(extract_observed_model("antigravity", "Loading...\n> ").is_none());
+    assert!(extract_observed_model("claude", "Claude Code v2.1.50\nOpus 4.6 · Claude Max\n").is_none());
+}
+
+#[test]
+fn spawn_model_verification_passes_mismatches_and_records_unverified() {
+    use crate::{
+        model_check::{apply_model_check, verify_model_with_reader},
+        output::format_receipt,
+    };
+    use orcherd_core::{ModelCheckStatus, Receipt, Seat};
+    use std::time::Duration;
+
+    let make_receipt = || Receipt {
+        request_id: None,
+        team_id: "team-1".to_owned(),
+        actor: "super".to_owned(),
+        next: Some("orcherd inbox".to_owned()),
+        failed_stage: None,
+        data: ReceiptData::SpawnPrepared {
+            seat: Box::new(Seat {
+                team_id: "team-1".to_owned(),
+                seat_id: "seat-1".to_owned(),
+                name: "neon3".to_owned(),
+                role: SeatRole::Worker,
+                agent: "antigravity".to_owned(),
+                model: Some("gemini-4-neon-high".to_owned()),
+                account: None,
+                effort: None,
+                address: Address::None,
+                worktree_path: None,
+                branch: None,
+                keep_open: true,
+                resume_session: None,
+                standing_brief: None,
+                paused_at: None,
+                last_seen_at: None,
+                created_at: String::new(),
+                updated_at: String::new(),
+            }),
+            task: None,
+            dispatch: None,
+            warm_reuse: false,
+            model_check: None,
+        },
+    };
+
+    // 1. Matching screen passes (verified), even after a transient startup/auth frame.
+    let mut polls = 0;
+    let check = verify_model_with_reader(
+        "antigravity",
+        "gemini-4-neon-high",
+        Duration::from_millis(200),
+        Duration::from_millis(5),
+        || {
+            polls += 1;
+            if polls == 1 {
+                Some("Antigravity CLI 1.5.18\nYou are not logged into Antigravity\n".to_owned())
+            } else {
+                Some("Antigravity CLI 1.5.17 · Gemini 4 Neon (High)\n".to_owned())
+            }
+        },
+    );
+    assert_eq!(check.status, ModelCheckStatus::Verified);
+    let mut receipt = make_receipt();
+    assert!(!apply_model_check(&mut receipt, "t23", "antigravity", check));
+    assert_eq!(receipt.failed_stage, None);
+    let formatted = format_receipt(&receipt, false);
+    assert!(formatted.contains("verified: Antigravity CLI 1.5.17 · Gemini 4 Neon (High)"));
+
+    // 2. Mismatching screen fails loudly with `model_mismatch` and observed line in `next`.
+    let check = verify_model_with_reader(
+        "antigravity",
+        "gemini-4-neon-high",
+        Duration::from_millis(200),
+        Duration::from_millis(5),
+        || Some("Antigravity CLI 1.1.7 · Claude Opus 5.5\n".to_owned()),
+    );
+    assert_eq!(check.status, ModelCheckStatus::Mismatch);
+    let mut receipt = make_receipt();
+    assert!(apply_model_check(&mut receipt, "t23", "antigravity", check));
+    assert_eq!(receipt.failed_stage.as_deref(), Some("model_mismatch"));
+    let next = receipt.next.as_deref().unwrap();
+    assert!(next.contains("Antigravity CLI 1.1.7 · Claude Opus 5.5"));
+    assert!(next.contains("terminal stopped"));
+    assert!(next.contains("orcherd preflight --agent antigravity"));
+
+    // 3. Screen with no recognisable model line is recorded as unverified, without failing.
+    let check = verify_model_with_reader(
+        "antigravity",
+        "gemini-4-neon-high",
+        Duration::from_millis(15),
+        Duration::from_millis(5),
+        || Some("Antigravity CLI 1.5.18\nLoading...\n".to_owned()),
+    );
+    assert_eq!(check.status, ModelCheckStatus::Unverified);
+    assert_eq!(check.observed, None);
+    let mut receipt = make_receipt();
+    assert!(!apply_model_check(&mut receipt, "t23", "antigravity", check));
+    assert_eq!(receipt.failed_stage, None);
+    let formatted = format_receipt(&receipt, false);
+    assert!(formatted.contains("Model: gemini-4-neon-high (unverified)"));
+
+    // 4. Harnesses without a model screen parser return unverified immediately.
+    let mut unknown_polls = 0;
+    let check = verify_model_with_reader(
+        "claude",
+        "opus",
+        Duration::from_secs(5),
+        Duration::from_millis(5),
+        || {
+            unknown_polls += 1;
+            Some(String::new())
+        },
+    );
+    assert_eq!(check.status, ModelCheckStatus::Unverified);
+    assert_eq!(unknown_polls, 0);
+}
+
+#[test]
+fn preflight_parses_probe_output_and_flags_path_and_version_drift() {
+    use crate::preflight::{ProbeResult, build_report, parse_probe_output};
+
+    let hc = parse_probe_output("/home/u/.local/bin/agy\n1.1.7\n");
+    let shell = parse_probe_output("/home/linuxbrew/.linuxbrew/bin/agy\n1.5.18\n");
+    assert_eq!(hc.path.as_deref(), Some("/home/u/.local/bin/agy"));
+    assert_eq!(hc.version.as_deref(), Some("1.1.7"));
+
+    let drifted = build_report(
+        "antigravity".to_owned(),
+        "agy".to_owned(),
+        None,
+        hc.clone(),
+        shell.clone(),
+    );
+    assert!(drifted.path_drift);
+    assert!(drifted.version_drift);
+
+    let matched = build_report(
+        "antigravity".to_owned(),
+        "agy".to_owned(),
+        None,
+        shell.clone(),
+        shell,
+    );
+    assert!(!matched.path_drift);
+    assert!(!matched.version_drift);
+
+    let missing = parse_probe_output("\n");
+    assert_eq!(
+        missing,
+        ProbeResult {
+            error: None,
+            path: None,
+            version: None,
+        }
+    );
+}

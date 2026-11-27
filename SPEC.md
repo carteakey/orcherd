@@ -116,7 +116,7 @@ To avoid both Herding v1's brittle pane bindings and Orca's hourly OAuth sign-ou
    - **Cold Seat Start**: If the seat has no live terminal on `herdr-core`, `orcherd` prepares the worktree (`current`, `new-child`, `new-top-level`, or `path:<dir>`), runs `bootstrap_symlinks`, resolves the launch `argv` (from `[agents.<id>].argv` in `.orcherd.toml` when set, else the built-in base, then appending `--model` and resume flags), calls `terminal.run` with:
      - `env`: `ORCHERD_CLI_COMMAND`, `ORCHERD_TEAM`, `ORCHERD_SEAT`, `ORCHERD_DISPATCH`, `ORCHERD_MACHINE` (if remote), `ORCHERD_REMOTE_SOCKET` (if remote)
      - `labels`: `orcherd.team`, `orcherd.seat`, `orcherd.role`, `orcherd.dispatch`
-     and waits for `agent::ready` before sending the initial doorbell.
+     and waits for `agent::ready` before sending the initial doorbell. When `--model` is set on a harness whose first screen names the active model (such as `agy`), `orcherd spawn` reads a bounded slice of the screen via `terminal.read` (bounded to ~20 s): a matching screen records `model_check.status = "verified"`, a mismatching screen kills the wrong-model terminal and fails loudly with `failed_stage: "model_mismatch"` and the observed line in `next` (leaving the seat unbound so it never silently runs the wrong model), and an unrecognised screen records `model_check.status = "unverified"` without failing.
    - **Receipt after binding**: `spawn` prints its receipt only after the terminal is bound, with the seat re-read from the store, so `address` is the new terminal (never a pre-bind `none`). If the run or the bind fails, the receipt names the `failed_stage` and the command exits 1.
    - **Warm Seat Reuse**: If the seat already has a live `herdr-core` terminal running the matching agent (`reply::agent_in_front`), `orcherd` does **not** spawn a new OS process. It updates `dispatches` and writes the new task brief to `inbox`; `orcherd daemon` rings the warm terminal as soon as its status is `idle`.
    - **Reboot / Crash Resume (`--resume`)**: Relaunches the seat's harness with its saved `resume_session` (`claude --resume <id>`, `zcode --resume <id>`, `agy --conversation=<id>`) in its existing `worktree_path` and updates `address_terminal`.
@@ -457,6 +457,7 @@ Setup & Skills:
   orcherd freeze (--reason <text> | --reason-file <path>) [--json]   # supervisor or human
   orcherd unfreeze [--json]
   orcherd daemon [start|stop|status] [--json]
+  orcherd preflight --agent <id> [--on <hc_machine>] [--json]
   orcherd tunnel <machine> [--remote-socket <path>] [--ssh-arg <arg>...] [--json]
 
 Seats & Dispatches:

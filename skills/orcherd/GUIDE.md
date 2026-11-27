@@ -38,6 +38,7 @@ ORCHERD spawn --seat <seat_name> --agent <agent> --worktree <current|new-child> 
 
 Always:
 - **Wait for the doorbell after dispatching**: Let `orcherd daemon` wake you. Polling `inbox` or `seat read` in a loop wastes tokens and races with delivery receipts.
+- **Verify PATH drift before spawning**: `ORCHERD preflight --agent <id> [--on <machine>]` compares the binary path and `--version` that `herdr-core` resolves against your shell. When `spawn --model <id>` detects a different model on the harness's startup screen, it exits 1 with `failed_stage: "model_mismatch"` and the observed line in `next`.
 - **Inspect via `seat read` only on stall or escalation**: `ORCHERD seat read <seat> --lines 40` reads bounded output through `herdr-core` without attaching to the pane.
 
 ## When Orcherd wakes you

@@ -21,7 +21,7 @@ pub use store::{Store, format_doorbell};
 pub use templates::{SeatTemplate, template_seats};
 pub use types::{
     Actor, Address, AuditRow, Confidence, Dispatch, DispatchState, DoneOutcome, Doorbell,
-    DoorbellOutcome, Finding, Gate, GateKind, GateStatus, InboxItem, InboxKind, Op, Post, PostKind,
-    Receipt, ReceiptData, RequestEnvelope, Seat, SeatRole, Task, TaskStatus, Team, TeamProjection,
-    TemplateKind, VerdictKind,
+    DoorbellOutcome, Finding, Gate, GateKind, GateStatus, InboxItem, InboxKind, ModelCheck,
+    ModelCheckStatus, Op, Post, PostKind, Receipt, ReceiptData, RequestEnvelope, Seat, SeatRole,
+    Task, TaskStatus, Team, TeamProjection, TemplateKind, VerdictKind,
 };

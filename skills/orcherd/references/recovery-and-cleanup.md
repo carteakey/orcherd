@@ -46,6 +46,13 @@ After **3 consecutive dispatch failures** in one `--retry-of` chain (excluding a
   ORCHERD spawn --seat <seat> --task <task_id> --resume --json
   ```
 
+## Spawn `model_mismatch` and `orcherd preflight`
+
+When `ORCHERD spawn --model <id>` launches a cold seat whose startup screen names the active model (for example `agy`), Orcherd checks the first screen (bounded to ~20 s) before binding the seat:
+- **Match**: recorded as `model_check.status = "verified"`.
+- **Mismatch**: stops the mismatched terminal, exits `1` with `failed_stage: "model_mismatch"`, includes the observed screen line in `next`, and leaves the seat unbound so the wrong model never runs the task. Run `ORCHERD preflight --agent <id>` (add `--on <machine>` for remote seats) to compare the binary path and `--version` in `herdr-core`'s `PATH` against your shell, fix any stale binary or `.orcherd.toml` `[agents.<id>].argv` override, and retry.
+- **No recognisable model line**: recorded as `model_check.status = "unverified"` without failing the spawn.
+
 ## Explicit stop, abandon, and release
 
 - `ORCHERD seat stop <seat|dispatch_id>`: Stops the supervised agent terminal via `herdr-core` and settles the active dispatch. If exit cannot be confirmed, it exits 1 with `stop_unknown`.

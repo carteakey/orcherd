@@ -220,6 +220,14 @@ impl Core {
         Ok(terminal_metadata_preview(&attachment.terminal))
     }
 
+    /// Reads the rendered screen plus `lines` of scrollback history via `terminal.read`.
+    pub fn read_screen(&self, terminal: &str, lines: u32) -> Result<wire::ReadScreen> {
+        self.typed(
+            Method::TerminalRead,
+            &json!({"terminal": terminal, "lines": lines}),
+        )
+    }
+
     pub fn run(&self, run: &wire::Run<'_>) -> Result<Terminal> {
         self.typed(Method::TerminalRun, run)
     }

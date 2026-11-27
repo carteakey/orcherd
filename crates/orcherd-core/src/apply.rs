@@ -422,7 +422,7 @@ fn exec_spawn_prepare(conn: &Connection, team_id: &str, actor: &Actor, now: &str
         team_id: team_id.to_string(),
         ref_id,
         next: Some("orcherd inbox".to_string()),
-        data: ReceiptData::SpawnPrepared { seat: Box::new(seat_record), task: task_record.map(Box::new), dispatch: dispatch_record.map(Box::new), warm_reuse },
+        data: ReceiptData::SpawnPrepared { seat: Box::new(seat_record), task: task_record.map(Box::new), dispatch: dispatch_record.map(Box::new), warm_reuse, model_check: None },
     })
 }
 

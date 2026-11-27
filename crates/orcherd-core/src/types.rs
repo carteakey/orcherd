@@ -875,6 +875,24 @@ impl RequestEnvelope {
     }
 }
 
+/// Outcome of verifying a spawned seat's active model against `--model`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCheck {
+    pub requested: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed: Option<String>,
+    pub status: ModelCheckStatus,
+}
+
+/// Whether the launched terminal's first screen confirmed the requested model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCheckStatus {
+    Verified,
+    Mismatch,
+    Unverified,
+}
+
 /// Structured result payload inside a `Receipt`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
@@ -885,6 +903,8 @@ pub enum ReceiptData {
         task: Option<Box<Task>>,
         dispatch: Option<Box<Dispatch>>,
         warm_reuse: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_check: Option<ModelCheck>,
     },
     Seat(Box<Seat>),
     Seats(Vec<Seat>),
