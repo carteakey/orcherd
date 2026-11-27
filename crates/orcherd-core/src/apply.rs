@@ -25,8 +25,8 @@ use crate::types::{
 
 mod supervise;
 use supervise::{
-    exec_freeze, exec_seat_brief, exec_task_reopen, exec_task_update, refuse_if_finished,
-    refuse_if_frozen,
+    clear_seat_address_if_bound, exec_freeze, exec_seat_brief, exec_task_reopen, exec_task_update,
+    refuse_if_finished, refuse_if_frozen,
 };
 
 struct OpOutcome {
@@ -213,25 +213,34 @@ fn exec_team_op(conn: &Connection, team_id: &str, actor: &Actor, now: &str, op: 
         }
         Op::SeatStop { target, reason } => {
             let stop_reason = reason.as_deref().unwrap_or("user_stopped");
-            if let Ok(disp) = resolve_dispatch(conn, team_id, &target) {
-                conn.execute("UPDATE dispatches SET state = 'stopped', stage = 'stopped', stop_reason = ?1, settled_at = ?2, updated_at = ?2 WHERE dispatch_id = ?3", params![stop_reason, now, disp.dispatch_id])?;
-                let updated = resolve_dispatch(conn, team_id, &disp.dispatch_id)?;
-                return Ok(OpOutcome::simple(team_id, Some(updated.dispatch_id.clone()), ReceiptData::Dispatch(Box::new(updated))));
+            match resolve_dispatch(conn, team_id, &target) {
+                Ok(disp) => {
+                    conn.execute("UPDATE dispatches SET state = 'stopped', stage = 'stopped', stop_reason = ?1, settled_at = ?2, updated_at = ?2 WHERE dispatch_id = ?3", params![stop_reason, now, disp.dispatch_id])?;
+                    clear_seat_address_if_bound(conn, team_id, &disp.seat_id, disp.terminal_address.as_deref(), now)?;
+                    let updated = resolve_dispatch(conn, team_id, &disp.dispatch_id)?;
+                    return Ok(OpOutcome::simple(team_id, Some(updated.dispatch_id.clone()), ReceiptData::Dispatch(Box::new(updated))));
+                }
+                Err(Error::NotFound { .. }) => {}
+                Err(err) => return Err(err),
             }
             let seat = resolve_seat(conn, team_id, &target)?;
             conn.execute("UPDATE dispatches SET state = 'stopped', stage = 'stopped', stop_reason = ?1, settled_at = ?2, updated_at = ?2 WHERE team_id = ?3 AND seat_id = ?4 AND state IN ('starting', 'ready', 'working')", params![stop_reason, now, team_id, seat.seat_id])?;
-            Ok(OpOutcome::simple(team_id, Some(seat.seat_id.clone()), ReceiptData::Seat(Box::new(seat))))
+            conn.execute("UPDATE seats SET address_kind = 'none', address_machine = NULL, address_terminal = NULL, updated_at = ?1 WHERE team_id = ?2 AND seat_id = ?3", params![now, team_id, seat.seat_id])?;
+            let updated = resolve_seat(conn, team_id, &seat.seat_id)?;
+            Ok(OpOutcome::simple(team_id, Some(updated.seat_id.clone()), ReceiptData::Seat(Box::new(updated))))
         }
         Op::SeatAbandon { dispatch_id } => {
             let disp = resolve_dispatch(conn, team_id, &dispatch_id)?;
             conn.execute("UPDATE dispatches SET state = 'abandoned', stage = 'abandoned', stop_reason = COALESCE(stop_reason, 'abandoned'), settled_at = ?1, updated_at = ?1 WHERE dispatch_id = ?2", params![now, disp.dispatch_id])?;
             conn.execute("UPDATE tasks SET status = 'ready', assignee_seat = NULL, updated_at = ?1 WHERE task_id = ?2 AND status IN ('assigned', 'in_progress')", params![now, disp.task_id])?;
+            conn.execute("UPDATE inbox SET delivered_at = COALESCE(delivered_at, ?1), read_at = COALESCE(read_at, ?1) WHERE team_id = ?2 AND kind = 'dispatch' AND ref_id = ?3", params![now, team_id, disp.dispatch_id])?;
             let updated = resolve_dispatch(conn, team_id, &disp.dispatch_id)?;
             Ok(OpOutcome::simple(team_id, Some(updated.dispatch_id.clone()), ReceiptData::Dispatch(Box::new(updated))))
         }
         Op::SeatRelease { dispatch_id } => {
             let disp = resolve_dispatch(conn, team_id, &dispatch_id)?;
             conn.execute("UPDATE dispatches SET state = 'stopped', stage = 'released', stop_reason = 'released', settled_at = ?1, updated_at = ?1 WHERE dispatch_id = ?2", params![now, disp.dispatch_id])?;
+            clear_seat_address_if_bound(conn, team_id, &disp.seat_id, disp.terminal_address.as_deref(), now)?;
             let updated = resolve_dispatch(conn, team_id, &disp.dispatch_id)?;
             Ok(OpOutcome::simple(team_id, Some(updated.dispatch_id.clone()), ReceiptData::Dispatch(Box::new(updated))))
         }

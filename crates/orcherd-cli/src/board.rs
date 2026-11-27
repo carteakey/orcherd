@@ -5,11 +5,11 @@ use crate::{
         GlobalFlags, execute_op, parse_list_arg, read_optional_file_or_inline,
         read_required_file_or_inline, req_val, run_op_raw,
     },
-    output::print_value,
+    output::{format_receipt, print_value},
 };
 use orcherd_core::{
-    Address, Confidence, DoneOutcome, GateStatus, Op, PostKind, ReceiptData, TaskStatus,
-    VerdictKind,
+    Address, Confidence, DoneOutcome, GateStatus, Op, PostKind, Receipt, ReceiptData, TaskStatus,
+    TeamProjection, VerdictKind,
 };
 use orcherd_hc::{Core, Endpoint};
 use std::{env, path::PathBuf, str::FromStr, time::Duration};
@@ -54,8 +54,7 @@ pub fn handle_seat(args: &[String], global: &GlobalFlags) -> Result<i32, String>
                 .first()
                 .ok_or_else(|| "`seat stop <seat|dispatch_id>` requires a target".to_owned())?
                 .clone();
-            kill_target_terminal_in_core(&target, global);
-            execute_op(
+            stop_or_release_seat(
                 Op::SeatStop {
                     target,
                     reason: Some("user_stopped".to_owned()),
@@ -75,8 +74,7 @@ pub fn handle_seat(args: &[String], global: &GlobalFlags) -> Result<i32, String>
                 .first()
                 .ok_or_else(|| "`seat release <dispatch_id>` requires a dispatch ID".to_owned())?
                 .clone();
-            kill_target_terminal_in_core(&dispatch_id, global);
-            execute_op(Op::SeatRelease { dispatch_id }, global)
+            stop_or_release_seat(Op::SeatRelease { dispatch_id }, global)
         }
         "rebind" => {
             let seat = rest
@@ -148,46 +146,76 @@ pub fn handle_seat(args: &[String], global: &GlobalFlags) -> Result<i32, String>
     }
 }
 
-fn kill_target_terminal_in_core(target: &str, global: &GlobalFlags) {
-    let Ok(status_receipt) = run_op_raw(Op::Status, global) else {
-        return;
-    };
-    let ReceiptData::TeamStatus(proj) = status_receipt.data else {
-        return;
-    };
-    let mut term_addr = None;
-    for seat in &proj.seats {
-        if (seat.name == target || seat.seat_id == target)
-            && let Address::Core {
-                ref machine,
-                ref terminal,
-            } = seat.address
-        {
-            term_addr = Some(match machine {
-                Some(m) if !terminal.contains('/') => format!("{m}/{terminal}"),
-                _ => terminal.clone(),
-            });
-            break;
-        }
-    }
-    if term_addr.is_none() {
-        for d in &proj.active_dispatches {
-            if d.dispatch_id.starts_with(target)
-                && let Some(ref t) = d.terminal_address
+fn stop_or_release_seat(op: Op, global: &GlobalFlags) -> Result<i32, String> {
+    let receipt = stop_or_release_with(
+        op,
+        |o| run_op_raw(o, global),
+        |addr| {
+            if let Ok(ep) = Endpoint::resolve_env()
+                && let Ok(core) = Core::connect(&ep)
             {
-                term_addr = Some(match d.machine {
-                    Some(ref m) if !t.contains('/') => format!("{m}/{t}"),
-                    _ => t.clone(),
-                });
-                break;
+                let _ = core.kill(addr);
             }
-        }
+        },
+    )?;
+    let failed = receipt.failed_stage.is_some();
+    outln!("{}", format_receipt(&receipt, global.json));
+    Ok(if failed { 1 } else { 0 })
+}
+
+/// Validates and applies `Op::SeatStop` / `Op::SeatRelease` before killing any
+/// terminal, so ambiguous prefixes or unknown targets never kill live terminals.
+pub(crate) fn stop_or_release_with<R, K>(
+    op: Op,
+    mut run_op: R,
+    mut kill_terminal: K,
+) -> Result<Receipt, String>
+where
+    R: FnMut(Op) -> Result<Receipt, String>,
+    K: FnMut(&str),
+{
+    // Read-only snapshot so we still know the seat's pre-stop terminal address
+    // after `apply` clears `seats.address` to `none`.
+    let before = run_op(Op::Status).ok().and_then(|r| match r.data {
+        ReceiptData::TeamStatus(proj) => Some(*proj),
+        _ => None,
+    });
+    let receipt = run_op(op)?;
+    if let Some(addr) = resolved_terminal_to_kill(&receipt, before.as_ref()) {
+        kill_terminal(&addr);
     }
-    if let Some(addr) = term_addr
-        && let Ok(ep) = Endpoint::resolve_env()
-        && let Ok(core) = Core::connect(&ep)
-    {
-        let _ = core.kill(&addr);
+    Ok(receipt)
+}
+
+fn resolved_terminal_to_kill(
+    receipt: &Receipt,
+    before: Option<&TeamProjection>,
+) -> Option<String> {
+    let format_addr = |machine: Option<&str>, terminal: &str| match machine {
+        Some(m) if !terminal.contains('/') => format!("{m}/{terminal}"),
+        _ => terminal.to_owned(),
+    };
+    let seat_addr_before = |seat_id: &str| {
+        before?
+            .seats
+            .iter()
+            .find(|s| s.seat_id == seat_id)
+            .and_then(|s| match s.address {
+                Address::Core {
+                    ref machine,
+                    ref terminal,
+                } => Some(format_addr(machine.as_deref(), terminal)),
+                _ => None,
+            })
+    };
+    match &receipt.data {
+        ReceiptData::Seat(seat) => seat_addr_before(&seat.seat_id),
+        ReceiptData::Dispatch(disp) => disp
+            .terminal_address
+            .as_deref()
+            .map(|t| format_addr(disp.machine.as_deref(), t))
+            .or_else(|| seat_addr_before(&disp.seat_id)),
+        _ => None,
     }
 }
 

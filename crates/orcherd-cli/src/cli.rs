@@ -683,6 +683,7 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
 
     let mut receipt = store.apply(&actor, env_req).map_err(|e| e.to_string())?;
     let mut spawn_model_check = None;
+    let mut mismatch_dispatch = None;
     let mut trust_note = None;
 
     if let ReceiptData::SpawnPrepared {
@@ -805,6 +806,7 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
                                 check.map(|c| (terminal.address.clone(), seat_agent_cloned.clone(), c));
                             if mismatch {
                                 let _ = core.kill(&terminal.address);
+                                mismatch_dispatch = dispatch_id;
                             } else {
                                 let bound = store.apply(
                                     &actor,
@@ -855,8 +857,16 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
         }
     }
 
-    if let Some((term_addr, seat_agent, check)) = spawn_model_check {
-        let _ = model_check::apply_model_check(&mut receipt, &term_addr, &seat_agent, check);
+    if let Some((term_addr, seat_agent, check)) = spawn_model_check
+        && model_check::apply_model_check(&mut receipt, &term_addr, &seat_agent, check)
+    {
+        model_check::cleanup_model_mismatch(
+            &mut store,
+            &actor,
+            &team.team_id,
+            mismatch_dispatch.as_deref(),
+            &mut receipt,
+        );
     }
 
     // The receipt is printed only after the terminal is bound, and always carries the seat

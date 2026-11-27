@@ -5,7 +5,9 @@
 //! bounded slice of the first screen right after `agent::ready` catches mismatches loudly
 //! before the seat starts work.
 
-use orcherd_core::{ModelCheck, ModelCheckStatus, Receipt, ReceiptData};
+use orcherd_core::{
+    Actor, ModelCheck, ModelCheckStatus, Op, Receipt, ReceiptData, RequestEnvelope, Store,
+};
 use orcherd_hc::{AgentKind, Core, Error};
 use std::{
     thread,
@@ -125,6 +127,47 @@ pub(crate) fn apply_model_check(
         *model_check = Some(check);
     }
     mismatch
+}
+
+/// Settles the dispatch created by a spawn that failed `model_mismatch` so the task
+/// returns to `ready`, no orphaned active dispatch remains, and the stale unread
+/// `dispatch` inbox item is cleared.
+pub(crate) fn cleanup_model_mismatch(
+    store: &mut Store,
+    actor: &Actor,
+    team_id: &str,
+    dispatch_id: Option<&str>,
+    receipt: &mut Receipt,
+) {
+    let Some(did) = dispatch_id else {
+        return;
+    };
+    let Ok(abandoned) = store.apply(
+        actor,
+        RequestEnvelope::new(Op::SeatAbandon {
+            dispatch_id: did.to_owned(),
+        })
+        .with_team(team_id),
+    ) else {
+        return;
+    };
+    if let ReceiptData::Dispatch(disp) = abandoned.data
+        && let ReceiptData::SpawnPrepared {
+            dispatch: ref mut r_disp,
+            task: ref mut r_task,
+            ..
+        } = receipt.data
+    {
+        let task_id = disp.task_id.clone();
+        *r_disp = Some(disp);
+        if let Ok(t_receipt) = store.apply(
+            actor,
+            RequestEnvelope::new(Op::TaskShow { task_id }).with_team(team_id),
+        ) && let ReceiptData::Task(updated_task) = t_receipt.data
+        {
+            *r_task = Some(updated_task);
+        }
+    }
 }
 
 /// Reads a bounded screen slice, returning `None` when the terminal is gone so polling stops.

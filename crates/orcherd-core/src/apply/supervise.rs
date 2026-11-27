@@ -9,7 +9,7 @@ use crate::store::{
     build_team_projection, list_seats, resolve_seat, resolve_task, unblock_ready_dag_tasks,
     write_inbox,
 };
-use crate::types::{Actor, InboxKind, Op, ReceiptData, SeatRole, Task, TaskStatus};
+use crate::types::{Actor, Address, InboxKind, Op, ReceiptData, SeatRole, Task, TaskStatus};
 
 /// Supervisor seats and humans may steer the team; other seats may not.
 pub(super) fn require_supervisor(conn: &Connection, team_id: &str, actor: &Actor, what: &str) -> Result<()> {
@@ -194,4 +194,28 @@ pub(super) fn exec_task_reopen(conn: &Connection, team_id: &str, actor: &Actor, 
     write_inbox(conn, team_id, assignee, actor.actor_name(), InboxKind::Assigned, &task.task_id, &subject, spec, now)?;
     let updated = resolve_task(conn, team_id, &task.task_id)?;
     Ok(OpOutcome::simple(team_id, Some(updated.task_id.clone()), ReceiptData::Task(Box::new(updated))))
+}
+
+/// Clears `seats.address` when a stopped/released dispatch owned the seat's
+/// currently bound terminal so the daemon and UI mod stop targeting a dead terminal.
+pub(super) fn clear_seat_address_if_bound(
+    conn: &Connection,
+    team_id: &str,
+    seat_id: &str,
+    dispatch_terminal: Option<&str>,
+    now: &str,
+) -> Result<()> {
+    let seat = resolve_seat(conn, team_id, seat_id)?;
+    let matches_bound = match (&seat.address, dispatch_terminal) {
+        (Address::Core { terminal: bound, .. }, Some(dt)) => bound == dt,
+        (Address::Core { .. }, None) => true,
+        _ => false,
+    };
+    if matches_bound {
+        conn.execute(
+            "UPDATE seats SET address_kind = 'none', address_machine = NULL, address_terminal = NULL, updated_at = ?1 WHERE team_id = ?2 AND seat_id = ?3",
+            params![now, team_id, seat.seat_id],
+        )?;
+    }
+    Ok(())
 }

@@ -10,6 +10,8 @@ pub mod types;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_lifecycle;
+#[cfg(test)]
 mod tests_supervise;
 #[cfg(test)]
 mod tests_team;
