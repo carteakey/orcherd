@@ -16,7 +16,7 @@ It combines two battle-tested halves (detailed in [`docs/ORIGIN-AND-LESSONS.md`]
 1. **From Orca (`orca orchestration`)**:
    - **Two-tier version-matched skill discovery (`orcherd skills get`)**: A tiny static discovery stub in `~/.agents/skills/orcherd/SKILL.md` resolves `$ORCHERD_CLI_COMMAND` once per session and loads the version-matched base guide (`GUIDE.md`) and on-demand `references/*.md` compiled directly into the `orcherd` binary.
    - **Turn-ending reactive push wakes (`done`, `ask`, `reply`, `verdict`, `escalation`)**: Agents never poll or run cron sweeps. Workers end their turn after `done` or `ask`; `orcherd daemon` watches `herdr-core`'s `events.subscribe` stream and rings idle seats with a 1-line doorbell via `terminal.send { if: "idle" }`.
-   - **File-first, idempotent CLI (`--spec-file`, `--body-file`, `--result-file`)**: Eliminates shell quoting and PTY paste truncation. Every mutation is keyed by `(caller_id, request_id)` in `mutation_receipts` and returns a JSON receipt with `failed_stage` and a conditional `next` hint.
+   - **File-first, idempotent CLI (`--spec-file`, `--body-file`, `--result-file`)**: Eliminates shell quoting and PTY paste truncation. Every mutation is keyed by `(team_id, caller_id, request_id)` in `mutation_receipts` and returns a JSON receipt with `failed_stage` and a conditional `next` hint.
 2. **From Herding Teams (`herdr-team` & `herdr-supervisor`)**:
    - **Persistent named seats & warm session reuse**: Keep role-aware seats (`super`/`director`, `vicesuper`/`gauntlet`, `planner`, `builder-a`, `builder-b`, `zcode1..3`) warm across tasks so OAuth-authenticated CLIs (Antigravity, Claude, ZCode, Codex) stay signed in all day and retain role memory.
    - **Claimable Task Board with DAG `deps` & Blind Reviewer Gates**: Tasks support `--deps`, GitHub issue links, and automatic `reviewer_seat` routing (`reviewer_seat != assignee_seat`), plus the `AUTHORIZED: push` landing discipline.
@@ -146,7 +146,7 @@ To avoid both Herding v1's brittle pane bindings and Orca's hourly OAuth sign-ou
 
 ## 4. SQLite Schema (`store.sqlite3`)
 
-Opened with `PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;`. Versioned via `PRAGMA user_version` (currently 2; v2 adds `teams.paused_reason`, the reason `orcherd freeze` records and every refused caller sees). Migrations are additive and run on open. Any binary seeing `user_version > SCHEMA_VERSION` returns `Error::SchemaTooNew { found, supported }` without writing.
+Opened with `PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;`. Versioned via `PRAGMA user_version` (currently 3; v2 adds `teams.paused_reason`, the reason `orcherd freeze` records and every refused caller sees; v3 adds `mutation_receipts.team_id` so `--request-id` scopes per team). Migrations are additive and run on open. Any binary seeing `user_version > SCHEMA_VERSION` returns `Error::SchemaTooNew { found, supported }` without writing.
 
 ```sql
 CREATE TABLE teams (
@@ -325,6 +325,7 @@ CREATE TABLE doorbell (
 );
 
 CREATE TABLE mutation_receipts (
+    team_id             TEXT NOT NULL DEFAULT '',
     caller_id           TEXT NOT NULL,
     request_id          TEXT NOT NULL,
     op                  TEXT NOT NULL,
@@ -333,7 +334,7 @@ CREATE TABLE mutation_receipts (
                         CHECK(state IN ('pending', 'completed')),
     receipt_json        TEXT NOT NULL,
     created_at          TEXT NOT NULL,
-    PRIMARY KEY (caller_id, request_id)
+    PRIMARY KEY (team_id, caller_id, request_id)
 );
 
 CREATE TABLE audit (

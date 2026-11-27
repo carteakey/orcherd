@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 /// Current supported SQLite schema version (`PRAGMA user_version`).
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 const SCHEMA_V1_DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS teams (
@@ -237,9 +237,83 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         // v2: why a team is frozen (`orcherd freeze`), shown to every caller it refuses.
         conn.execute_batch("ALTER TABLE teams ADD COLUMN paused_reason TEXT;")?;
     }
+    if found < 3 {
+        // v3: scope `mutation_receipts` by `team_id` so `--request-id` never collides across teams.
+        migrate_v3_mutation_receipts(conn)?;
+    }
     if found < SCHEMA_VERSION {
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
     }
 
+    Ok(())
+}
+
+const MUTATION_RECEIPTS_V3_DDL: &str = r#"
+CREATE TABLE mutation_receipts_v3 (
+    team_id             TEXT NOT NULL DEFAULT '',
+    caller_id           TEXT NOT NULL,
+    request_id          TEXT NOT NULL,
+    op                  TEXT NOT NULL,
+    payload_hash        TEXT NOT NULL,
+    state               TEXT NOT NULL DEFAULT 'completed'
+                        CHECK(state IN ('pending', 'completed')),
+    receipt_json        TEXT NOT NULL,
+    created_at          TEXT NOT NULL,
+    PRIMARY KEY (team_id, caller_id, request_id)
+);
+"#;
+
+fn migrate_v3_mutation_receipts(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(MUTATION_RECEIPTS_V3_DDL)?;
+    let existing: Vec<(String, String, String, String, String, String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT caller_id, request_id, op, payload_hash, state, receipt_json, created_at FROM mutation_receipts",
+        )?;
+        stmt.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    {
+        let mut insert = tx.prepare(
+            "INSERT OR REPLACE INTO mutation_receipts_v3 \
+             (team_id, caller_id, request_id, op, payload_hash, state, receipt_json, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )?;
+        for (caller_id, request_id, op, payload_hash, state, receipt_json, created_at) in existing {
+            let team_id = if op == "init" {
+                String::new()
+            } else {
+                serde_json::from_str::<serde_json::Value>(&receipt_json)
+                    .ok()
+                    .and_then(|v| v.get("team_id").and_then(|t| t.as_str()).map(str::to_owned))
+                    .unwrap_or_default()
+            };
+            insert.execute(rusqlite::params![
+                team_id,
+                caller_id,
+                request_id,
+                op,
+                payload_hash,
+                state,
+                receipt_json,
+                created_at,
+            ])?;
+        }
+    }
+    tx.execute_batch(
+        "DROP TABLE mutation_receipts;\n\
+         ALTER TABLE mutation_receipts_v3 RENAME TO mutation_receipts;",
+    )?;
+    tx.commit()?;
     Ok(())
 }

@@ -112,3 +112,165 @@ fn not_found_errors_name_the_searched_team() {
         .unwrap_err();
     assert_eq!(team_err.to_string(), "team not found: no-such-team");
 }
+
+fn init_op(name: &str) -> Op {
+    Op::Init {
+        name: name.to_string(),
+        template: Some(TemplateKind::Small),
+        goal: None,
+        workspace_root: format!("/ws/{name}"),
+        bootstrap_symlinks: vec![],
+        bootstrap_copies: vec![],
+    }
+}
+
+fn init_team(store: &mut Store, name: &str) -> String {
+    store.apply(&human(), RequestEnvelope::new(init_op(name))).unwrap().team_id
+}
+
+fn task_create(title: &str) -> Op {
+    Op::TaskCreate {
+        title: Some(title.to_string()),
+        spec: format!("Spec for {title}"),
+        deps: vec![],
+        assign: None,
+        reviewer: None,
+        issue_ref: None,
+        parent_id: None,
+        placement: None,
+    }
+}
+
+#[test]
+fn mutation_receipts_isolated_per_team_and_init_replays() {
+    use crate::{Error, ReceiptData};
+
+    let mut store = Store::open_in_memory().unwrap();
+    let actor = human();
+
+    let (init_r1, replayed1) = store
+        .apply_with_replay(&actor, RequestEnvelope::new(init_op("alpha")).with_request_id("req-init"))
+        .unwrap();
+    let (init_r2, replayed2) = store
+        .apply_with_replay(&actor, RequestEnvelope::new(init_op("alpha")).with_request_id("req-init"))
+        .unwrap();
+    assert!(!replayed1 && replayed2);
+    assert_eq!(init_r1, init_r2);
+    let team_a = init_r1.team_id;
+    let team_b = init_team(&mut store, "beta");
+
+    // Reusing `req-init` inside `team_a` must not collide with store-wide `Op::Init`.
+    let (_, init_key_reused) = store
+        .apply_with_replay(
+            &actor,
+            RequestEnvelope::new(task_create("After init")).with_team(&team_a).with_request_id("req-init"),
+        )
+        .unwrap();
+    assert!(!init_key_reused);
+
+    // Same caller, same Op, same `--request-id` across two teams must execute independently.
+    let op = task_create("Ship feature");
+    let req = |team: &str, op: Op| RequestEnvelope::new(op).with_team(team).with_request_id("req-shared");
+    let (ra, ra_replayed) = store.apply_with_replay(&actor, req(&team_a, op.clone())).unwrap();
+    let (rb, rb_replayed) = store.apply_with_replay(&actor, req(&team_b, op.clone())).unwrap();
+    assert!(!ra_replayed && !rb_replayed);
+    assert_eq!((ra.team_id.as_str(), rb.team_id.as_str()), (team_a.as_str(), team_b.as_str()));
+    let (ReceiptData::Task(ta), ReceiptData::Task(tb)) = (&ra.data, &rb.data) else {
+        panic!("expected Task receipts");
+    };
+    assert_ne!(ta.task_id, tb.task_id);
+
+    // Replaying within each team returns that team's own cached receipt.
+    let (ra2, ra2_replayed) = store.apply_with_replay(&actor, req(&team_a, op.clone())).unwrap();
+    let (rb2, rb2_replayed) = store.apply_with_replay(&actor, req(&team_b, op)).unwrap();
+    assert!(ra2_replayed && rb2_replayed);
+    assert_eq!((ra, rb), (ra2, rb2));
+
+    // Same team + same request_id + different Op still raises RequestConflict.
+    let err = store.apply(&actor, req(&team_a, task_create("Different payload"))).unwrap_err();
+    assert!(matches!(err, Error::RequestConflict { ref request_id } if request_id == "req-shared"));
+}
+
+#[test]
+fn schema_v2_to_v3_migration_backfills_team_id_and_preserves_replay() {
+    use rusqlite::Connection;
+    use sha2::{Digest, Sha256};
+    use tempfile::tempdir;
+
+    use crate::{Error, SCHEMA_VERSION, read_user_version};
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("store.sqlite3");
+    let actor = human();
+
+    let (team_a, op_a, original_receipt) = {
+        let mut store = Store::open(&db_path).unwrap();
+        let team_a = init_team(&mut store, "alpha");
+        let op_a = task_create("Pre-migration task");
+        let receipt = store
+            .apply(&actor, RequestEnvelope::new(op_a.clone()).with_team(&team_a).with_request_id("req-v2"))
+            .unwrap();
+        (team_a, op_a, receipt)
+    };
+
+    // Simulate a v2 database: drop `team_id` from `mutation_receipts`, store v2 op-only hash,
+    // and reset `PRAGMA user_version = 2`.
+    {
+        let raw = Connection::open(&db_path).unwrap();
+        let legacy_hash: String = Sha256::digest(serde_json::to_vec(&op_a).unwrap())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let receipt_json = serde_json::to_string(&original_receipt).unwrap();
+        raw.execute_batch(
+            "DROP TABLE mutation_receipts;\n\
+             CREATE TABLE mutation_receipts (\n\
+                 caller_id TEXT NOT NULL, request_id TEXT NOT NULL, op TEXT NOT NULL,\n\
+                 payload_hash TEXT NOT NULL,\n\
+                 state TEXT NOT NULL DEFAULT 'completed' CHECK(state IN ('pending', 'completed')),\n\
+                 receipt_json TEXT NOT NULL, created_at TEXT NOT NULL,\n\
+                 PRIMARY KEY (caller_id, request_id)\n\
+             );\n\
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+        raw.execute(
+            "INSERT INTO mutation_receipts (caller_id, request_id, op, payload_hash, state, receipt_json, created_at) \
+             VALUES (?1, 'req-v2', 'task_create', ?2, 'completed', ?3, '2026-11-27T00:00:00Z')",
+            rusqlite::params![actor.caller_id(), legacy_hash, receipt_json],
+        )
+        .unwrap();
+        assert_eq!(read_user_version(&raw).unwrap(), 2);
+    }
+
+    // Reopening upgrades v2 -> v3, backfills `team_id`, preserves replay, and isolates new teams.
+    let mut store = Store::open(&db_path).unwrap();
+    assert_eq!(read_user_version(store.connection()).unwrap(), SCHEMA_VERSION);
+    let migrated_team_id: String = store
+        .connection()
+        .query_row(
+            "SELECT team_id FROM mutation_receipts WHERE caller_id = ?1 AND request_id = 'req-v2'",
+            rusqlite::params![actor.caller_id()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(migrated_team_id, team_a);
+
+    let (replayed_receipt, replayed) = store
+        .apply_with_replay(&actor, RequestEnvelope::new(op_a.clone()).with_team(&team_a).with_request_id("req-v2"))
+        .unwrap();
+    assert!(replayed);
+    assert_eq!(replayed_receipt, original_receipt);
+
+    let conflict = store
+        .apply(&actor, RequestEnvelope::new(task_create("Other")).with_team(&team_a).with_request_id("req-v2"))
+        .unwrap_err();
+    assert!(matches!(conflict, Error::RequestConflict { .. }));
+
+    let team_b = init_team(&mut store, "beta");
+    let (beta_receipt, beta_replayed) = store
+        .apply_with_replay(&actor, RequestEnvelope::new(op_a).with_team(&team_b).with_request_id("req-v2"))
+        .unwrap();
+    assert!(!beta_replayed);
+    assert_eq!(beta_receipt.team_id, team_b);
+}

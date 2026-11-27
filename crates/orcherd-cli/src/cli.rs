@@ -14,7 +14,7 @@ use crate::{
     },
     mod_install, model_check,
     output::{format_receipt, print_value, subcommand_help},
-    preflight, remote, skills, tunnel,
+    preflight, remote, skills, spawn_replay, tunnel,
     worktree::{self, WorktreeSpec},
 };
 use orcherd_core::{
@@ -681,7 +681,7 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
         env_req = env_req.with_request_id(req_id);
     }
 
-    let mut receipt = store.apply(&actor, env_req).map_err(|e| e.to_string())?;
+    let (mut receipt, replayed) = store.apply_with_replay(&actor, env_req).map_err(|e| e.to_string())?;
     let mut spawn_model_check = None;
     let mut mismatch_dispatch = None;
     let mut trust_note = None;
@@ -699,26 +699,29 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
         let seat_model_cloned = seat.model.clone();
         let seat_role_str = seat.role.to_string();
         let seat_keep_open = seat.keep_open;
+        let seat_bound_now = spawn_replay::seat_is_bound(&store, &team.team_id, &seat_name_cloned);
 
         if let Some(term) = explicit_terminal {
-            store
-                .apply(
-                    &actor,
-                    RequestEnvelope::new(Op::SpawnBindAddress {
-                        seat: seat_name,
-                        dispatch_id,
-                        address: Address::Core {
-                            machine,
-                            terminal: term,
-                        },
-                        worktree_path: Some(prepared_wt.path.display().to_string()),
-                        branch: prepared_wt.branch,
-                        resume_session,
-                    })
-                    .with_team(&team.team_id),
-                )
-                .map_err(|e| e.to_string())?;
-        } else if warm_reuse {
+            if !replayed || !seat_bound_now {
+                store
+                    .apply(
+                        &actor,
+                        RequestEnvelope::new(Op::SpawnBindAddress {
+                            seat: seat_name,
+                            dispatch_id,
+                            address: Address::Core {
+                                machine,
+                                terminal: term,
+                            },
+                            worktree_path: Some(prepared_wt.path.display().to_string()),
+                            branch: prepared_wt.branch,
+                            resume_session,
+                        })
+                        .with_team(&team.team_id),
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+        } else if warm_reuse || (replayed && seat_bound_now) {
             if let Ok(ref core) = core_res {
                 let _ = daemon::ring_seat_if_no_daemon(
                     &mut store,
@@ -728,7 +731,7 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
                     &seat_name_cloned,
                 );
             }
-        } else if !no_launch {
+        } else if spawn_replay::should_cold_launch(replayed, warm_reuse, seat_bound_now, resume_session.is_some(), no_launch) {
             if let Some(ref m) = machine {
                 let _ = tunnel::ensure_background_tunnel(&state_dir, m);
             }

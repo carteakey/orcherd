@@ -1,10 +1,7 @@
 //! Single-transaction `apply(&mut Store, &Actor, RequestEnvelope) -> Result<Receipt>` engine.
 
-use std::fmt::Write as _;
-
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 use crate::store::{
@@ -23,7 +20,9 @@ use crate::types::{
     TaskStatus, TemplateKind, VerdictKind,
 };
 
+mod receipts;
 mod supervise;
+use receipts::{ReceiptKey, ReceiptLookup, lookup_receipt, store_receipt};
 use supervise::{
     clear_seat_address_if_bound, exec_freeze, exec_seat_brief, exec_task_reopen, exec_task_update,
     refuse_if_finished, refuse_if_frozen,
@@ -44,28 +43,37 @@ impl OpOutcome {
 
 /// Apply a `RequestEnvelope` inside a single SQLite transaction.
 pub fn apply(store: &mut Store, actor: &Actor, envelope: RequestEnvelope) -> Result<Receipt> {
+    apply_with_replay(store, actor, envelope).map(|(receipt, _)| receipt)
+}
+
+/// Apply a `RequestEnvelope` inside a single SQLite transaction, also returning whether the
+/// receipt was replayed from `mutation_receipts`.
+pub fn apply_with_replay(store: &mut Store, actor: &Actor, envelope: RequestEnvelope) -> Result<(Receipt, bool)> {
     let tx = store.conn.transaction()?;
     let now = now_iso();
     let caller_id = actor.caller_id();
     let op_name = envelope.op.name();
     let read_only = envelope.op.is_read_only();
 
-    let payload_hash = if let Some(req_id) = envelope.request_id.as_deref() {
-        let hash = sha256_hex(&serde_json::to_vec(&envelope.op)?);
-        let existing: Option<(String, String)> = tx
-            .query_row(
-                "SELECT payload_hash, receipt_json FROM mutation_receipts WHERE caller_id = ?1 AND request_id = ?2",
-                params![caller_id, req_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if let Some((stored_hash, stored_json)) = existing {
-            if stored_hash == hash {
-                return Ok(serde_json::from_str(&stored_json)?);
-            }
-            return Err(Error::RequestConflict { request_id: req_id.to_string() });
+    // Resolve the target team before looking up `mutation_receipts` so `--request-id`
+    // is isolated per team (`Op::Init` is store-wide and uses `""`).
+    let resolved_team = if matches!(envelope.op, Op::Init { .. }) {
+        None
+    } else {
+        Some(resolve_team_for_actor(&tx, envelope.team.as_deref(), actor)?)
+    };
+    let receipt_team_id = resolved_team.as_ref().map_or("", |t| t.team_id.as_str());
+
+    let receipt_key = envelope.request_id.as_deref().map(|request_id| ReceiptKey {
+        team_id: receipt_team_id,
+        caller_id: &caller_id,
+        request_id,
+    });
+    let payload_hash = if let Some(ref key) = receipt_key {
+        match lookup_receipt(&tx, key, &envelope.op)? {
+            ReceiptLookup::Replay(cached) => return Ok((cached, true)),
+            ReceiptLookup::Fresh(hash) => Some(hash),
         }
-        Some(hash)
     } else {
         None
     };
@@ -75,7 +83,7 @@ pub fn apply(store: &mut Store, actor: &Actor, envelope: RequestEnvelope) -> Res
             exec_init(&tx, actor, &now, &name, template, goal.as_deref(), &workspace_root, &bootstrap_symlinks, &bootstrap_copies)?
         }
         other_op => {
-            let team = resolve_team_for_actor(&tx, envelope.team.as_deref(), actor)?;
+            let team = resolved_team.as_ref().ok_or_else(|| Error::validation("team not resolved"))?;
             if let Actor::Seat { seat_name, .. } = actor {
                 let clean = seat_name.trim().trim_start_matches('@');
                 tx.execute(
@@ -101,25 +109,12 @@ pub fn apply(store: &mut Store, actor: &Actor, envelope: RequestEnvelope) -> Res
         data: outcome.data,
     };
 
-    if let (Some(req_id), Some(hash)) = (envelope.request_id.as_deref(), payload_hash.as_deref()) {
-        let receipt_json = serde_json::to_string(&receipt)?;
-        tx.execute(
-            "INSERT INTO mutation_receipts (caller_id, request_id, op, payload_hash, state, receipt_json, created_at) VALUES (?1, ?2, ?3, ?4, 'completed', ?5, ?6)",
-            params![caller_id, req_id, op_name, hash, receipt_json, now],
-        )?;
+    if let (Some(ref key), Some(hash)) = (receipt_key, payload_hash.as_deref()) {
+        store_receipt(&tx, key, op_name, hash, &receipt, &now)?;
     }
 
     tx.commit()?;
-    Ok(receipt)
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(64);
-    for b in digest {
-        let _ = write!(&mut out, "{b:02x}");
-    }
-    out
+    Ok((receipt, false))
 }
 
 #[allow(clippy::too_many_arguments)]

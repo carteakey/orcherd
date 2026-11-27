@@ -16,7 +16,7 @@ mod tests_supervise;
 #[cfg(test)]
 mod tests_team;
 
-pub use apply::apply;
+pub use apply::{apply, apply_with_replay};
 pub use error::{Error, Result};
 pub use schema::{SCHEMA_VERSION, init_schema, read_user_version};
 pub use store::{Store, format_doorbell};

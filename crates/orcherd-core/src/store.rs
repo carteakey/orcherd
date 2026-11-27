@@ -9,7 +9,7 @@ use chrono::{SecondsFormat, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use uuid::Uuid;
 
-use crate::apply::apply;
+use crate::apply::{apply, apply_with_replay};
 use crate::error::{Error, Result};
 use crate::schema;
 use crate::types::{
@@ -71,6 +71,11 @@ impl Store {
     /// Execute `envelope` atomically inside a single SQLite transaction.
     pub fn apply(&mut self, actor: &Actor, envelope: RequestEnvelope) -> Result<Receipt> {
         apply(self, actor, envelope)
+    }
+
+    /// Execute `envelope` atomically, also reporting whether it was replayed from `mutation_receipts`.
+    pub fn apply_with_replay(&mut self, actor: &Actor, envelope: RequestEnvelope) -> Result<(Receipt, bool)> {
+        apply_with_replay(self, actor, envelope)
     }
 
     /// Read SQLite's `PRAGMA data_version` to detect cross-process writes without polling tables.

@@ -865,3 +865,22 @@ fn preflight_parses_probe_output_and_flags_path_and_version_drift() {
         }
     );
 }
+
+#[test]
+fn spawn_cold_launch_skips_replayed_and_already_bound_seats() {
+    use crate::spawn_replay::should_cold_launch;
+
+    // Fresh cold spawn launches.
+    assert!(should_cold_launch(false, false, false, false, false));
+    // Replayed SpawnPrepare never cold-launches (whether seat is bound or not).
+    assert!(!should_cold_launch(true, false, true, false, false));
+    assert!(!should_cold_launch(true, false, false, false, false));
+    assert!(!should_cold_launch(true, false, true, true, false));
+    // Warm reuse or already-bound live seat without `--resume` skips cold launch.
+    assert!(!should_cold_launch(false, true, true, false, false));
+    assert!(!should_cold_launch(false, false, true, false, false));
+    // Fresh `--resume` on a bound seat still launches the resumed session.
+    assert!(should_cold_launch(false, false, true, true, false));
+    // `--no-launch` never launches.
+    assert!(!should_cold_launch(false, false, false, false, true));
+}
