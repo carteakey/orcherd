@@ -19,7 +19,7 @@ use crate::store::{
 use crate::templates::seed_template_seats;
 use crate::types::{
     Actor, DispatchState, DoneOutcome, Doorbell, DoorbellOutcome, Gate, GateKind, GateStatus,
-    InboxItem, InboxKind, Op, Receipt, ReceiptData, RequestEnvelope, SeatRole, TaskStatus,
+    InboxItem, InboxKind, Op, Receipt, ReceiptData, RequestEnvelope, SeatRole, Task, TaskStatus,
     TemplateKind, VerdictKind,
 };
 
@@ -586,12 +586,41 @@ fn exec_inbox_read(conn: &Connection, team_id: &str, actor: &Actor, now: &str, p
     Ok(OpOutcome::simple(team_id, Some(target_seat), ReceiptData::Inbox(items)))
 }
 
+/// Refuses turn outcomes (`done`, `verdict`, `ask`) on a finished task so a late or
+/// crossed message cannot silently reopen it; only a supervisor can with `task reopen`.
+fn refuse_if_finished(task: &Task, action: &str) -> Result<()> {
+    if !matches!(
+        task.status,
+        TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+    ) {
+        return Ok(());
+    }
+    let hint = if action == "ask" {
+        format!(
+            "omit the task id to `orcherd ask` the supervisor without modifying it, or have the supervisor run `orcherd task reopen {}`",
+            task.task_id
+        )
+    } else {
+        format!(
+            "use `orcherd ask` to message the supervisor, or have the supervisor run `orcherd task reopen {}`",
+            task.task_id
+        )
+    };
+    Err(Error::validation(format!(
+        "cannot `{action}` task '{}': status is already {}; {hint}",
+        task.task_id, task.status
+    )))
+}
+
 fn exec_ask(conn: &Connection, team_id: &str, actor: &Actor, now: &str, task_ref: Option<&str>, question: &str, body: Option<&str>) -> Result<OpOutcome> {
     let task = if let Some(tref) = task_ref {
         Some(resolve_task(conn, team_id, tref)?)
     } else {
         find_active_task_for_seat(conn, team_id, actor.actor_name())?
     };
+    if let Some(t) = &task {
+        refuse_if_finished(t, "ask")?;
+    }
     let active_dispatch = if let Ok(seat) = resolve_seat(conn, team_id, actor.actor_name()) {
         find_active_dispatch_for_seat(conn, team_id, &seat.seat_id, task.as_ref().map(|t| t.task_id.as_str()))?
     } else {
@@ -655,6 +684,7 @@ fn exec_done(
         find_active_task_for_seat(conn, team_id, actor.actor_name())?
             .ok_or_else(|| Error::not_found("task", actor.actor_name()))?
     };
+    refuse_if_finished(&task, "done")?;
 
     let settled_dispatch = if let Ok(seat) = resolve_seat(conn, team_id, actor.actor_name()) {
         if let Some(disp) = find_active_dispatch_for_seat(conn, team_id, &seat.seat_id, Some(&task.task_id))? {
@@ -705,6 +735,7 @@ fn exec_done(
 
 fn exec_verdict(conn: &Connection, team_id: &str, actor: &Actor, now: &str, task_ref: &str, verdict: VerdictKind, body: &str) -> Result<OpOutcome> {
     let task = resolve_task(conn, team_id, task_ref)?;
+    refuse_if_finished(&task, "verdict")?;
     if let Some(assignee) = task.assignee_seat.as_deref() {
         check_reviewer_blindness(conn, team_id, assignee, actor.actor_name())?;
         if let Some(rev) = task.reviewer_seat.as_deref() {

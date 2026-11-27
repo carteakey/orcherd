@@ -380,3 +380,215 @@ fn stalled_escalation_deduplicates_sets_stop_reason_and_skips_supervisor() {
     assert_eq!(escalations[0].ref_id, disp.dispatch_id);
     assert!(escalations[0].subject.contains("stalled"));
 }
+
+#[test]
+fn done_verdict_and_ask_refuse_finished_tasks_without_mutating_state() {
+    let (_dir, mut store, team_id) = team();
+    let task = task_in_review(&mut store);
+
+    store
+        .apply(
+            &seat("vicesuper"),
+            RequestEnvelope::new(Op::Verdict {
+                task_id: task.task_id.clone(),
+                verdict: VerdictKind::Pass,
+                body: "looks good".to_string(),
+            }),
+        )
+        .unwrap();
+
+    // Mark existing inbox items read so we can verify refused ops ring nobody.
+    for s in ["super", "vicesuper", "zcode1"] {
+        store
+            .apply(
+                &seat(s),
+                RequestEnvelope::new(Op::InboxRead {
+                    peek: false,
+                    seat: None,
+                    limit: None,
+                }),
+            )
+            .unwrap();
+    }
+
+    let done_err = store
+        .apply(
+            &seat("zcode1"),
+            RequestEnvelope::new(Op::Done {
+                task_id: Some(task.task_id.clone()),
+                result: "crossed repeat done".to_string(),
+                branch: None,
+                commit_sha: None,
+                outcome: DoneOutcome::Succeeded,
+            }),
+        )
+        .unwrap_err();
+    let done_msg = done_err.to_string();
+    assert!(done_msg.contains("completed"), "{done_msg}");
+    assert!(done_msg.contains("orcherd ask"), "{done_msg}");
+    assert!(done_msg.contains("task reopen"), "{done_msg}");
+
+    for verdict in [VerdictKind::Pass, VerdictKind::Fix, VerdictKind::Escalate] {
+        let err = store
+            .apply(
+                &seat("vicesuper"),
+                RequestEnvelope::new(Op::Verdict {
+                    task_id: task.task_id.clone(),
+                    verdict,
+                    body: "late verdict".to_string(),
+                }),
+            )
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("completed") && msg.contains("task reopen"), "{msg}");
+    }
+
+    let ask_err = store
+        .apply(
+            &seat("zcode1"),
+            RequestEnvelope::new(Op::Ask {
+                task_id: Some(task.task_id.clone()),
+                question: "follow-up on finished task".to_string(),
+                body: None,
+            }),
+        )
+        .unwrap_err();
+    let ask_msg = ask_err.to_string();
+    assert!(ask_msg.contains("completed") && ask_msg.contains("orcherd ask"), "{ask_msg}");
+
+    // Task stays completed and neither reviewer nor supervisor was rung by the refused ops.
+    let ReceiptData::Task(still_done) = store
+        .apply(&human(), RequestEnvelope::new(Op::TaskShow { task_id: task.task_id.clone() }))
+        .unwrap()
+        .data
+    else {
+        panic!("expected Task");
+    };
+    assert_eq!(still_done.status, TaskStatus::Completed);
+    assert!(unread(&store, &team_id, "vicesuper").is_empty());
+    assert!(unread(&store, &team_id, "super").is_empty());
+
+    // Asking the supervisor without a finished task id still succeeds cleanly.
+    store
+        .apply(
+            &seat("zcode1"),
+            RequestEnvelope::new(Op::Ask {
+                task_id: None,
+                question: "general question".to_string(),
+                body: None,
+            }),
+        )
+        .unwrap();
+
+    // `failed` and `cancelled` tasks are refused the same way.
+    for terminal in [TaskStatus::Failed, TaskStatus::Cancelled] {
+        let t = task_in_review(&mut store);
+        store
+            .apply(
+                &seat("super"),
+                RequestEnvelope::new(Op::TaskUpdate {
+                    task_id: t.task_id.clone(),
+                    status: terminal,
+                }),
+            )
+            .unwrap();
+        let err = store
+            .apply(
+                &seat("zcode1"),
+                RequestEnvelope::new(Op::Done {
+                    task_id: Some(t.task_id.clone()),
+                    result: "late done".to_string(),
+                    branch: None,
+                    commit_sha: None,
+                    outcome: DoneOutcome::Succeeded,
+                }),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains(terminal.as_str()), "{err}");
+        let ReceiptData::Task(after) = store
+            .apply(&human(), RequestEnvelope::new(Op::TaskShow { task_id: t.task_id }))
+            .unwrap()
+            .data
+        else {
+            panic!("expected Task");
+        };
+        assert_eq!(after.status, terminal);
+    }
+}
+
+#[test]
+fn replayed_done_and_verdict_with_same_request_id_return_original_receipt() {
+    let (_dir, mut store, _team_id) = team();
+
+    // 1. Replaying `done` (no reviewer -> completes task) with the same request_id returns the original receipt.
+    let ReceiptData::Task(unreviewed) = store
+        .apply(
+            &seat("super"),
+            RequestEnvelope::new(Op::TaskCreate {
+                title: Some("Solo task".to_string()),
+                spec: "finish it".to_string(),
+                deps: vec![],
+                assign: Some("zcode1".to_string()),
+                reviewer: None,
+                issue_ref: None,
+                parent_id: None,
+                placement: None,
+            }),
+        )
+        .unwrap()
+        .data
+    else {
+        panic!("expected Task");
+    };
+
+    let done_op = Op::Done {
+        task_id: Some(unreviewed.task_id),
+        result: "shipped".to_string(),
+        branch: None,
+        commit_sha: None,
+        outcome: DoneOutcome::Succeeded,
+    };
+    let first = store
+        .apply(&seat("zcode1"), RequestEnvelope::new(done_op.clone()).with_request_id("req-done-1"))
+        .unwrap();
+    let replay = store
+        .apply(&seat("zcode1"), RequestEnvelope::new(done_op.clone()).with_request_id("req-done-1"))
+        .unwrap();
+    assert_eq!(first, replay);
+    assert!(
+        store
+            .apply(&seat("zcode1"), RequestEnvelope::new(done_op).with_request_id("req-done-2"))
+            .is_err(),
+        "a fresh request_id on the completed task must be refused"
+    );
+
+    // 2. Replaying `verdict pass` with the same request_id returns the original receipt.
+    let reviewed = task_in_review(&mut store);
+    let verdict_op = Op::Verdict {
+        task_id: reviewed.task_id,
+        verdict: VerdictKind::Pass,
+        body: "approved".to_string(),
+    };
+    let v_first = store
+        .apply(
+            &seat("vicesuper"),
+            RequestEnvelope::new(verdict_op.clone()).with_request_id("req-verdict-1"),
+        )
+        .unwrap();
+    let v_replay = store
+        .apply(
+            &seat("vicesuper"),
+            RequestEnvelope::new(verdict_op.clone()).with_request_id("req-verdict-1"),
+        )
+        .unwrap();
+    assert_eq!(v_first, v_replay);
+    assert!(
+        store
+            .apply(
+                &seat("vicesuper"),
+                RequestEnvelope::new(verdict_op).with_request_id("req-verdict-2"),
+            )
+            .is_err(),
+        "a fresh verdict on the completed task must be refused"
+    );
+}
