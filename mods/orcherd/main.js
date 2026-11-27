@@ -5,10 +5,12 @@
 // repo you're looking at. `status` is a read-only op: polling it writes no audit rows.
 // Live seat status comes from herdr-core itself: seats that `orcherd spawn` starts carry
 // `orcherd.team` / `orcherd.seat` labels, which `terminals()` reports without polling.
+// The same labels group every live orcherd agent on this machine by team ("Teams"), so
+// Herdr's own Agents list stays as shipped.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, spaces, terminals, theme, run, checking, nextCommand, notify, window, home } from "herdr";
+import { exec, spaces, focused, terminals, theme, run, checking, nextCommand, notify, window, home } from "herdr";
 
 const POLL_MS = 5000;
 const BULLETIN_SHOWN = 6;
@@ -47,6 +49,7 @@ export default class Orcherd extends View {
     this.posts = [];
     this.armedAt = 0; // when the Freeze/Unfreeze button was armed
     this.acting = false;
+    this.teamNames = new Map(); // team id -> name, looked up once per team
     if (checking()) return;
     this.refresh(cx);
     cx.timer.every(POLL_MS, (cx) => {
@@ -62,10 +65,24 @@ export default class Orcherd extends View {
     });
   }
 
-  // The shown space's folder when it's on this machine: orcherd keeps its store locally.
+  // The folder you're looking at, on this machine (orcherd keeps its store locally): the
+  // focused terminal's, else the shown space's. A space's own folder is often just home.
   folder() {
-    const s = spaces().find((x) => x.active);
-    return s && !s.machine && s.folder ? s.folder : home();
+    const f = focused();
+    if (f?.cwd && !String(f.terminal ?? "").includes("/")) return f.cwd;
+    const s = spaces().find((x) => x.active && !x.machine);
+    return s?.folder || home();
+  }
+
+  // Names for the team ids on live terminals' labels. `status` is read-only; each id is
+  // asked once (a team from another store stays shown by id).
+  async nameTeams() {
+    const ids = new Set(terminals().map((t) => t.labels?.["orcherd.team"]).filter(Boolean));
+    for (const id of ids) {
+      if (this.teamNames.has(id)) continue;
+      const r = await exec("orcherd", ["--team", id, "status", "--json"], { cwd: home(), timeout: 10000 }).catch(() => null);
+      this.teamNames.set(id, r?.code === 0 ? JSON.parse(r.stdout)?.data?.value?.team?.name ?? null : null);
+    }
   }
 
   refresh(cx) {
@@ -78,11 +95,15 @@ export default class Orcherd extends View {
         if (r.code === 0) {
           const receipt = JSON.parse(r.stdout);
           this.proj = receipt?.data?.value ?? null;
+          // Only a team whose workspace holds this folder: with no match orcherd falls back to
+          // the newest team in the store, which belongs to some other repo.
+          const root = this.proj?.team?.workspace_root;
+          if (root && cwd !== root && !cwd.startsWith(root.endsWith("/") ? root : `${root}/`)) this.proj = null;
           this.error = null;
           this.announce(this.proj);
           // Bulletin: a read-only op, so polling it writes no audit rows.
-          const b = await exec("orcherd", ["--team", this.proj.team.team_id, "bulletin", "list", "--json"], { cwd, timeout: 10000 });
-          if (b.code === 0) this.posts = (JSON.parse(b.stdout)?.data?.value ?? []).slice(-BULLETIN_SHOWN).reverse();
+          const b = this.proj && await exec("orcherd", ["--team", this.proj.team.team_id, "bulletin", "list", "--json"], { cwd, timeout: 10000 });
+          if (b?.code === 0) this.posts = (JSON.parse(b.stdout)?.data?.value ?? []).slice(-BULLETIN_SHOWN).reverse();
         } else {
           const msg = (r.stderr || r.stdout).trim();
           // No team yet is a normal state, not an error.
@@ -93,6 +114,7 @@ export default class Orcherd extends View {
         this.proj = null;
         this.error = `orcherd is not runnable: ${e?.message ?? e}`;
       } finally {
+        await this.nameTeams().catch(() => {});
         this.cwd = cwd;
         this.loading = false;
         this.inflight = false;
@@ -192,7 +214,10 @@ export default class Orcherd extends View {
         .child(div().text_size(11).text_color(t.dim).truncate()
           .child(task ? task.title : status ? `${seat.agent} · ${status}` : `${seat.agent} · not running`)))
       .when(unread > 0, (el) => el.child(div().px(6).rounded(8).bg(t.accent).text_color(t.accent_foreground).text_size(10.5).child(String(unread))));
-    return term ? row.on_click(() => run("terminal.peek", { terminal: term.address })) : row;
+    if (!term) return row;
+    // Seats opened as tabs get focused; headless seats get a peek.
+    const cmd = term.labels?.["herdr.space"] ? "pane.focus" : "terminal.peek";
+    return row.on_click(() => run(cmd, { terminal: term.address }));
   }
 
   taskRow(t, task, seatName) {
@@ -226,12 +251,48 @@ export default class Orcherd extends View {
       .child(div().text_color(t.muted).child(body));
   }
 
+  // Every live orcherd agent on this machine, grouped by team. A click focuses the seat's
+  // tab, or peeks at a headless seat.
+  teamsSection(t, all, exceptTeam) {
+    const groups = new Map();
+    for (const term of all) {
+      const team = term.labels?.["orcherd.team"];
+      if (!team || team === exceptTeam || (term.state && term.state !== "live")) continue;
+      (groups.get(team) ?? groups.set(team, []).get(team)).push(term);
+    }
+    if (groups.size === 0) return null;
+    const rows = [...groups.entries()]
+      .sort(([a], [b]) => (this.teamNames.get(a) ?? a).localeCompare(this.teamNames.get(b) ?? b))
+      .map(([team, terms]) => v_flex().gap(1)
+        .child(div().px(8).text_size(11).text_color(t.muted).font_semibold().child(this.teamNames.get(team) ?? team))
+        .children(terms
+          .sort((a, b) => (ROLE_ORDER[a.labels["orcherd.role"]] ?? 9) - (ROLE_ORDER[b.labels["orcherd.role"]] ?? 9))
+          .map((term) => {
+            const status = term.status === "error" ? "blocked" : term.status ?? "idle";
+            const headless = !term.labels["herdr.space"];
+            return h_flex().id(`agent-${term.address}`).gap(8).items_center().px(8).py(3).rounded(6)
+              .hover((s) => s.bg(t.hover))
+              .child(div().size(8).rounded(4).flex_none().bg(statusColor(t, status)))
+              .child(div().flex_1().truncate().text_color(t.foreground).child(term.labels["orcherd.seat"] ?? term.address))
+              .child(div().text_size(11).text_color(t.dim).child(headless ? `${status} · headless` : status))
+              .on_click(() => run(headless ? "terminal.peek" : "pane.focus", { terminal: term.address }));
+          })));
+    return this.section(t, exceptTeam ? "Other teams" : "Teams", groups.size, v_flex().gap(8).children(rows));
+  }
+
   render(cx) {
     const t = theme();
     if (this.loading) return this.empty(t, "Orcherd", "Loading team board…");
     if (this.error) return this.empty(t, "Orcherd unavailable", this.error);
     const p = this.proj;
-    if (!p?.team) return this.empty(t, "No Orcherd team here", "Run `orcherd init --name <team> --template review-crew` in this repo.");
+    if (!p?.team) {
+      const teams = this.teamsSection(t, terminals(), null);
+      if (!teams) return this.empty(t, "No Orcherd team here", "Run `orcherd init --name <team> --template review-crew` in this repo.");
+      return v_flex().size_full().bg(t.surface).text_size(12.5)
+        .child(div().px(12).pt(12).pb(10).border_b(1).border_color(t.border).text_color(t.muted)
+          .child("No Orcherd team in this folder."))
+        .child(div().id("board").flex_1().overflow_y_scrollbar().p(8).child(teams));
+    }
     // Follow the shown space: refetch when it moved to another folder.
     if (this.cwd !== this.folder()) this.refresh(cx);
 
@@ -285,6 +346,8 @@ export default class Orcherd extends View {
             .on_click((_e, cx) => { this.showDone = !this.showDone; cx.notify(); })
             .child(`${this.showDone ? "▾" : "▸"} ${done} completed`)))
         .when(this.showDone, (el) => el.children((byStatus.completed ?? []).map((task) => this.taskRow(t, task, seatName))))));
+    const others = this.teamsSection(t, all, p.team.team_id);
+    if (others) body = body.child(others);
 
     return v_flex().size_full().bg(t.surface).text_size(12.5)
       .child(v_flex().px(12).pt(12).pb(10).gap(6).border_b(1).border_color(t.border)
