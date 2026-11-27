@@ -111,6 +111,19 @@ pub fn load_project_config(workspace_root: &Path) -> Result<ProjectConfigFile, S
     Ok(cfg)
 }
 
+/// Walks up from `cwd` to the enclosing git root (inclusive) and loads the first `.orcherd.toml`.
+pub fn load_project_config_up_to_git_root(cwd: &Path) -> Result<ProjectConfigFile, String> {
+    for dir in cwd.ancestors() {
+        if dir.join(".orcherd.toml").is_file() {
+            return load_project_config(dir);
+        }
+        if dir.join(".git").exists() {
+            break;
+        }
+    }
+    Ok(ProjectConfigFile::default())
+}
+
 /// Resolves or creates the worktree for a seat and applies `bootstrap_symlinks` and `bootstrap_copies`.
 pub fn prepare(
     workspace_root: &Path,

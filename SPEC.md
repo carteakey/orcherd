@@ -452,7 +452,7 @@ Instead of maintaining a forked GPUI window, `orcherd` renders inside the offici
 
 ## 8. Complete CLI Contract (`orcherd`)
 
-Every command accepts `--json`, `--team <name|id>`, and `--request-id <id>`. When `--team` is omitted, every command (including `spawn`) resolves the team in order: `$ORCHERD_TEAM`, `[team] name` in `.orcherd.toml` walking up from the working directory to the git root, the deepest `workspace_root` containing the working directory (newest team on a tie), and finally the newest team in the store. Missing task, seat, gate, and dispatch errors name the team searched.
+Every command accepts `--json`, `--team <name|id>`, and `--request-id <id>`. With `--json`, hard CLI errors print `{"ok": false, "error": "..."}` to stdout and exit non-zero. When `--team` is omitted, every command (including `spawn`) resolves the team in order: `$ORCHERD_TEAM`, `[team] name` in `.orcherd.toml` walking up from the working directory to the git root, the deepest `workspace_root` containing the working directory (newest team on a tie), and finally the newest team in the store. Missing task, seat, gate, and dispatch errors name the team searched.
 
 ```text
 Setup & Skills:

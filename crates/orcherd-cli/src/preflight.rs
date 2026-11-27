@@ -62,18 +62,33 @@ pub fn handle_preflight(args: &[String], global: &GlobalFlags) -> Result<i32, St
     }
 
     let agent = agent.ok_or_else(|| "`orcherd preflight` requires `--agent <id>`".to_owned())?;
-    let project_cfg = env::current_dir()
-        .ok()
-        .and_then(|cwd| worktree::load_project_config(&cwd).ok())
-        .unwrap_or_default();
-    let argv = agent_argv::build_agent_argv(&agent, None, None, &project_cfg.agents);
-    let binary = argv.into_iter().next().unwrap_or_else(|| agent.clone());
+    let binary = env::current_dir()
+        .map(|cwd| resolve_agent_binary(&agent, &cwd))
+        .unwrap_or_else(|_| {
+            agent_argv::build_agent_argv(&agent, None, None, &Default::default())
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| agent.clone())
+        });
 
     let hc = probe_hc(&binary, machine.as_deref());
     let shell = probe_shell(&binary);
     let report = build_report(agent, binary, machine, hc, shell);
     print_value(&report, global.json, format_report);
-    Ok(0)
+    Ok(if report_is_ok(&report) { 0 } else { 1 })
+}
+
+pub(crate) fn resolve_agent_binary(agent: &str, cwd: &Path) -> String {
+    let project_cfg = worktree::load_project_config_up_to_git_root(cwd).unwrap_or_default();
+    let argv = agent_argv::build_agent_argv(agent, None, None, &project_cfg.agents);
+    argv.into_iter().next().unwrap_or_else(|| agent.to_owned())
+}
+
+pub(crate) fn report_is_ok(report: &PreflightReport) -> bool {
+    report.hc.error.is_none()
+        && report.shell.error.is_none()
+        && report.hc.path.is_some()
+        && !report.version_drift
 }
 
 pub(crate) fn build_report(

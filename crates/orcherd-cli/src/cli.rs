@@ -80,7 +80,13 @@ pub struct GlobalFlags {
     pub version: bool,
 }
 
-pub fn run_from_args(raw_args: Vec<String>) -> Result<i32, String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliError {
+    pub json: bool,
+    pub message: String,
+}
+
+pub fn run_from_args(raw_args: Vec<String>) -> Result<i32, CliError> {
     let (global, args) = extract_global_flags(raw_args)?;
     if global.version {
         if global.json {
@@ -105,7 +111,7 @@ pub fn run_from_args(raw_args: Vec<String>) -> Result<i32, String> {
     let cmd = args[0].as_str();
     let rest = &args[1..];
 
-    match cmd {
+    let res = match cmd {
         "skills" | "skill" => handle_skills(rest, &global),
         "mod" => handle_mod(rest, &global),
         "daemon" => handle_daemon(rest, &global),
@@ -133,15 +139,23 @@ pub fn run_from_args(raw_args: Vec<String>) -> Result<i32, String> {
         other => Err(format!(
             "unknown command `{other}`; run `orcherd --help` for usage"
         )),
-    }
+    };
+    res.map_err(|message| CliError {
+        json: global.json,
+        message,
+    })
 }
 
-fn extract_global_flags(raw: Vec<String>) -> Result<(GlobalFlags, Vec<String>), String> {
+pub(crate) fn extract_global_flags(raw: Vec<String>) -> Result<(GlobalFlags, Vec<String>), CliError> {
     let mut g = GlobalFlags::default();
     let mut out = Vec::with_capacity(raw.len());
     let mut i = 0;
     while i < raw.len() {
         match raw[i].as_str() {
+            "--" => {
+                out.extend(raw[i..].iter().cloned());
+                break;
+            }
             "--json" => g.json = true,
             "-h" | "--help" => g.help = true,
             "-V" | "--version" => g.version = true,
@@ -149,7 +163,10 @@ fn extract_global_flags(raw: Vec<String>) -> Result<(GlobalFlags, Vec<String>), 
                 i += 1;
                 g.team = Some(
                     raw.get(i)
-                        .ok_or_else(|| "`--team` requires a value".to_owned())?
+                        .ok_or_else(|| CliError {
+                            json: g.json,
+                            message: "`--team` requires a value".to_owned(),
+                        })?
                         .clone(),
                 );
             }
@@ -157,7 +174,10 @@ fn extract_global_flags(raw: Vec<String>) -> Result<(GlobalFlags, Vec<String>), 
                 i += 1;
                 g.request_id = Some(
                     raw.get(i)
-                        .ok_or_else(|| "`--request-id` requires a value".to_owned())?
+                        .ok_or_else(|| CliError {
+                            json: g.json,
+                            message: "`--request-id` requires a value".to_owned(),
+                        })?
                         .clone(),
                 );
             }
@@ -165,15 +185,98 @@ fn extract_global_flags(raw: Vec<String>) -> Result<(GlobalFlags, Vec<String>), 
                 i += 1;
                 g.act_as = Some(
                     raw.get(i)
-                        .ok_or_else(|| "`--as` requires a seat name".to_owned())?
+                        .ok_or_else(|| CliError {
+                            json: g.json,
+                            message: "`--as` requires a seat name".to_owned(),
+                        })?
                         .clone(),
                 );
             }
-            arg => out.push(arg.to_owned()),
+            arg => {
+                // Keep a value-taking option paired with its argument so values like
+                // `--question -V` or `--ssh-arg -V` are never hijacked as global flags.
+                let takes_value = option_takes_value(arg, &out);
+                out.push(arg.to_owned());
+                if takes_value && i + 1 < raw.len() {
+                    i += 1;
+                    out.push(raw[i].clone());
+                }
+            }
         }
         i += 1;
     }
     Ok((g, out))
+}
+
+fn option_takes_value(flag: &str, preceding: &[String]) -> bool {
+    matches!(
+        flag,
+        "--account"
+            | "--after"
+            | "--agent"
+            | "--assign"
+            | "--base-branch"
+            | "--body"
+            | "--body-file"
+            | "--bootstrap-symlink"
+            | "--branch"
+            | "--brief-file"
+            | "--commit"
+            | "--confidence"
+            | "--deps"
+            | "--dir"
+            | "--effort"
+            | "--environment"
+            | "--evidence"
+            | "--evidence-file"
+            | "--from"
+            | "--gate"
+            | "--goal"
+            | "--id"
+            | "--issue"
+            | "--kind"
+            | "--limit"
+            | "--lines"
+            | "--machine"
+            | "--model"
+            | "--name"
+            | "--note"
+            | "--objective"
+            | "--on"
+            | "--outcome"
+            | "--parent"
+            | "--path"
+            | "--placement"
+            | "--question"
+            | "--reason"
+            | "--reason-file"
+            | "--ref"
+            | "--reference"
+            | "--remote-socket"
+            | "--reply-to"
+            | "--resolution"
+            | "--result"
+            | "--result-file"
+            | "--retry-of"
+            | "--reviewer"
+            | "--role"
+            | "--seat"
+            | "--spec"
+            | "--spec-file"
+            | "--ssh-arg"
+            | "--status"
+            | "--subject"
+            | "--task"
+            | "--task-title"
+            | "--template"
+            | "--terminal"
+            | "--title"
+            | "--to"
+            | "--verdict"
+            | "--workspace-root"
+            | "--worktree"
+    ) || (flag == "--brief"
+        && matches!(preceding, [cmd, sub, ..] if cmd == "seat" && sub == "brief"))
 }
 
 fn handle_skills(args: &[String], global: &GlobalFlags) -> Result<i32, String> {

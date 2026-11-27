@@ -884,3 +884,73 @@ fn spawn_cold_launch_skips_replayed_and_already_bound_seats() {
     // `--no-launch` never launches.
     assert!(!should_cold_launch(false, false, false, false, true));
 }
+
+#[test]
+fn preflight_exit_status_and_git_root_config_walk() {
+    use crate::preflight::{ProbeResult, build_report, report_is_ok, resolve_agent_binary};
+
+    let ok_probe = |p: &str, v: &str| ProbeResult {
+        error: None,
+        path: Some(p.to_owned()),
+        version: Some(v.to_owned()),
+    };
+    let missing = ProbeResult { error: None, path: None, version: None };
+    let failed = ProbeResult { error: Some("hc exec failed".to_owned()), path: None, version: None };
+
+    assert!(report_is_ok(&build_report("a".into(), "a".into(), None, ok_probe("/a/x", "1.0"), ok_probe("/a/x", "1.0"))));
+    // Path drift alone (same version) is a note, not a failure.
+    assert!(report_is_ok(&build_report("a".into(), "a".into(), None, ok_probe("/a/x", "1.0"), ok_probe("/b/x", "1.0"))));
+    // Version drift, missing hc binary, or probe error must fail.
+    assert!(!report_is_ok(&build_report("a".into(), "a".into(), None, ok_probe("/a/x", "1.0"), ok_probe("/b/x", "2.0"))));
+    assert!(!report_is_ok(&build_report("a".into(), "a".into(), None, missing.clone(), ok_probe("/b/x", "1.0"))));
+    assert!(!report_is_ok(&build_report("a".into(), "a".into(), None, missing, ProbeResult { error: None, path: None, version: None })));
+    assert!(!report_is_ok(&build_report("a".into(), "a".into(), None, failed, ok_probe("/b/x", "1.0"))));
+
+    // Subdirectory resolves `[agents.<id>].argv` from repo root `.orcherd.toml`, stopping at `.git`.
+    let tmp = TempDir::new().unwrap();
+    let parent_cfg = tmp.path().join(".orcherd.toml");
+    fs::write(&parent_cfg, "[agents.custom]\nargv = [\"leaked-parent\"]\n").unwrap();
+    let repo = tmp.path().join("repo");
+    let sub = repo.join("crates").join("app");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::create_dir_all(&sub).unwrap();
+    assert_eq!(resolve_agent_binary("custom", &sub), "custom");
+
+    fs::write(repo.join(".orcherd.toml"), "[agents.custom]\nargv = [\"repo-custom-bin\", \"--flag\"]\n").unwrap();
+    assert_eq!(resolve_agent_binary("custom", &sub), "repo-custom-bin");
+}
+
+#[test]
+fn extract_global_flags_preserves_option_values_and_double_dash() {
+    use crate::cli::extract_global_flags;
+
+    let args = |xs: &[&str]| xs.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+
+    let (g, rest) = extract_global_flags(args(&["ask", "--question", "-V"])).unwrap();
+    assert!(!g.version);
+    assert_eq!(rest, args(&["ask", "--question", "-V"]));
+
+    let (g, rest) = extract_global_flags(args(&["tunnel", "m1", "--ssh-arg", "-V", "--json"])).unwrap();
+    assert!(!g.version && g.json);
+    assert_eq!(rest, args(&["tunnel", "m1", "--ssh-arg", "-V"]));
+
+    let (g, rest) = extract_global_flags(args(&["ask", "--question", "--json"])).unwrap();
+    assert!(!g.json);
+    assert_eq!(rest, args(&["ask", "--question", "--json"]));
+
+    let (g, rest) = extract_global_flags(args(&["seat", "brief", "w1", "--brief", "-h", "--json"])).unwrap();
+    assert!(!g.help && g.json);
+    assert_eq!(rest, args(&["seat", "brief", "w1", "--brief", "-h"]));
+
+    let (g, rest) = extract_global_flags(args(&["task", "list", "--brief", "--json"])).unwrap();
+    assert!(g.json);
+    assert_eq!(rest, args(&["task", "list", "--brief"]));
+
+    let (g, rest) = extract_global_flags(args(&["spawn", "--seat", "w1", "--resume", "--json"])).unwrap();
+    assert!(g.json);
+    assert_eq!(rest, args(&["spawn", "--seat", "w1", "--resume"]));
+
+    let (g, rest) = extract_global_flags(args(&["ask", "--", "-V", "--json"])).unwrap();
+    assert!(!g.version && !g.json);
+    assert_eq!(rest, args(&["ask", "--", "-V", "--json"]));
+}

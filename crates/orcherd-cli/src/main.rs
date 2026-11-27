@@ -45,7 +45,18 @@ fn main() {
     match cli::run_from_args(args) {
         Ok(code) => std::process::exit(code),
         Err(err) => {
-            eprintln!("orcherd error: {err}");
+            if err.json {
+                let payload = serde_json::json!({
+                    "ok": false,
+                    "error": err.message,
+                });
+                outln!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string())
+                );
+            } else {
+                eprintln!("orcherd error: {}", err.message);
+            }
             std::process::exit(1);
         }
     }
