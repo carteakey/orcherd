@@ -120,7 +120,8 @@ The details, schema, and wire contract are in [SPEC.md](SPEC.md).
 ## Worktrees
 
 `--worktree new-child` puts a seat in `<repo>-wt/<seat>` on branch `orcherd/<seat>`. A fresh worktree
-lacks your untracked files, so list what to link or copy in `.orcherd.toml`:
+lacks your untracked files, so list what to link or copy in `.orcherd.toml`. You can also override
+any agent's launch command and base flags under `[agents.<id>]` (`--model` and resume flags still append):
 
 ```toml
 [team]
@@ -128,6 +129,9 @@ name = "shorts"
 template = "studio-crew"
 bootstrap_symlinks = [".env", ".venv", "node_modules", "work"]
 bootstrap_copies = []
+
+[agents.antigravity]
+argv = ["agy", "--dangerously-skip-permissions"]
 ```
 
 Other placements: `current`, `new-top-level`, `path:<dir>`.

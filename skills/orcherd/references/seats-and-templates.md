@@ -18,7 +18,7 @@ Initialize a roster in one command with `ORCHERD init --name <team> --template <
 | `studio-crew` | `director` (supervisor), `builder-a` & `builder-b` (workers), `gauntlet` (blind reviewer), `viewer-value` (reviewer) | Creative, media, or A/B implementation workflows where two builders produce intentional variants and blind reviewers grade them. |
 | `small` | `super` (supervisor), `w1..w3` (workers) | General parallel task execution without a separate reviewer seat. |
 
-You can also define custom templates and `bootstrap_symlinks` in `.orcherd.toml` at the repository root:
+You can also configure team defaults, `bootstrap_symlinks`, and per-agent launch `argv` overrides in `.orcherd.toml` at the repository root:
 
 ```toml
 [team]
@@ -31,6 +31,10 @@ bootstrap_symlinks = [
   "formats/gta6/.venv",
   "formats/gta6/work",
 ]
+
+# Optional: override a harness's base binary and flags; --model and resume flags still append.
+[agents.antigravity]
+argv = ["agy", "--dangerously-skip-permissions"]
 ```
 
 ## Intentional A/B variants and cross-pollination (`studio-crew`)

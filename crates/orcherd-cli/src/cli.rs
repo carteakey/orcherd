@@ -1,6 +1,7 @@
 //! CLI argument parser and command dispatcher (`SPEC.md` §8).
 
 use crate::{
+    agent_argv,
     board::{
         handle_approve, handle_ask, handle_bulletin, handle_done, handle_finding, handle_gate,
         handle_inbox, handle_log, handle_reply, handle_seat, handle_send, handle_task,
@@ -639,6 +640,7 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
     let team = store
         .resolve_team(team_ref.as_deref())
         .map_err(|e| e.to_string())?;
+    let project_cfg = worktree::load_project_config(Path::new(&team.workspace_root))?;
 
     let wt_spec = WorktreeSpec::parse(&worktree_arg, Some(&seat_name))?;
     let prepared_wt = worktree::prepare(
@@ -793,10 +795,11 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
                         labels.insert(herdr_space::SPACE_LABEL, space.as_str());
                     }
 
-                    let argv = build_agent_argv(
+                    let argv = agent_argv::build_agent_argv(
                         &seat_agent_cloned,
                         seat_model_cloned.as_deref(),
                         resume_session.as_deref(),
+                        &project_cfg.agents,
                     );
                     let cwd_str = prepared_wt.path.display().to_string();
                     let run_req = Run {
@@ -871,36 +874,6 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
     }
     outln!("{}", format_receipt(&receipt, global.json));
     Ok(if receipt.failed_stage.is_some() { 1 } else { 0 })
-}
-
-/// Launch argv for a seat's agent harness.
-///
-/// The seat's agent id is a harness name, not always a binary: `antigravity` ships as `agy`.
-/// Unattended seats run with the harness's no-approval flag, because a permission prompt in a
-/// worker terminal stalls the task until a human answers it.
-pub(crate) fn build_agent_argv(agent: &str, model: Option<&str>, resume: Option<&str>) -> Vec<String> {
-    let resume = resume.filter(|s| !s.is_empty());
-    let mut argv = match agent {
-        "antigravity" | "agy" | "antigravity-cli" | "antigravity_cli" => {
-            vec!["agy".to_owned(), "--dangerously-skip-permissions".to_owned()]
-        }
-        other => vec![other.to_owned()],
-    };
-    if let Some(m) = model.filter(|s| !s.is_empty()) {
-        argv.push("--model".to_owned());
-        argv.push(m.to_owned());
-    }
-    if let Some(r) = resume {
-        if argv[0] == "agy" && r == "latest" {
-            argv.push("--continue".to_owned());
-        } else {
-            argv.push("--resume".to_owned());
-            if r != "latest" {
-                argv.push(r.to_owned());
-            }
-        }
-    }
-    argv
 }
 
 pub fn run_op_raw(op: Op, global: &GlobalFlags) -> Result<Receipt, String> {

@@ -89,6 +89,11 @@ template = "studio-crew"
 bootstrap_symlinks = [".env", ".venv", "node_modules", "formats/gta6/.venv", "formats/gta6/work"]
 # Optional relative paths copied (not symlinked) into a new child worktree:
 bootstrap_copies = []
+
+# Optional per-agent base launch argv. Replaces the built-in binary and base flags;
+# --model and resume flags are still appended by `orcherd spawn`.
+[agents.antigravity]
+argv = ["agy", "--dangerously-skip-permissions"]
 ```
 
 ### 3.2 Persistent Seats (`seats`) vs. Dispatches (`dispatches`)
@@ -108,7 +113,7 @@ To avoid both Herding v1's brittle pane bindings and Orca's hourly OAuth sign-ou
 2. **Dispatch (`dispatch_id`, `task_id`, `seat_id`)**:
    - A single tracked execution attempt of a `Task` on a `Seat`.
    - **Transactional Binding before Launch**: `apply(Op::Spawn)` creates and commits the `(task_id, seat_id, dispatch_id)` records and the worker's `inbox` row **before** `orcherd` touches `herdr-core`, making brief swaps between concurrent spawns impossible.
-   - **Cold Seat Start**: If the seat has no live terminal on `herdr-core`, `orcherd` prepares the worktree (`current`, `new-child`, `new-top-level`, or `path:<dir>`), runs `bootstrap_symlinks`, calls `terminal.run` with:
+   - **Cold Seat Start**: If the seat has no live terminal on `herdr-core`, `orcherd` prepares the worktree (`current`, `new-child`, `new-top-level`, or `path:<dir>`), runs `bootstrap_symlinks`, resolves the launch `argv` (from `[agents.<id>].argv` in `.orcherd.toml` when set, else the built-in base, then appending `--model` and resume flags), calls `terminal.run` with:
      - `env`: `ORCHERD_CLI_COMMAND`, `ORCHERD_TEAM`, `ORCHERD_SEAT`, `ORCHERD_DISPATCH`, `ORCHERD_MACHINE` (if remote), `ORCHERD_REMOTE_SOCKET` (if remote)
      - `labels`: `orcherd.team`, `orcherd.seat`, `orcherd.role`, `orcherd.dispatch`
      and waits for `agent::ready` before sending the initial doorbell.

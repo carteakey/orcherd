@@ -6,6 +6,7 @@
 use orcherd_hc::new_command;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
 };
@@ -48,7 +49,15 @@ impl WorktreeSpec {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ProjectConfigFile {
     #[serde(default)]
+    pub agents: BTreeMap<String, AgentConfigSection>,
+    #[serde(default)]
     pub team: TeamConfigSection,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct AgentConfigSection {
+    #[serde(default)]
+    pub argv: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -82,7 +91,19 @@ pub fn load_project_config(workspace_root: &Path) -> Result<ProjectConfigFile, S
     }
     let text = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read `{}`: {e}", path.display()))?;
-    toml::from_str(&text).map_err(|e| format!("failed to parse `{}`: {e}", path.display()))
+    let cfg: ProjectConfigFile =
+        toml::from_str(&text).map_err(|e| format!("failed to parse `{}`: {e}", path.display()))?;
+    for (agent, section) in &cfg.agents {
+        if let Some(argv) = &section.argv
+            && argv.first().is_none_or(|bin| bin.trim().is_empty())
+        {
+            return Err(format!(
+                "invalid `{}`: `[agents.{agent}].argv` must start with a non-empty executable",
+                path.display()
+            ));
+        }
+    }
+    Ok(cfg)
 }
 
 /// Resolves or creates the worktree for a seat and applies `bootstrap_symlinks` and `bootstrap_copies`.

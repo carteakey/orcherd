@@ -12,6 +12,7 @@ macro_rules! out {
     ($($arg:tt)*) => { $crate::output::emit(&format!($($arg)*), false) };
 }
 
+pub mod agent_argv;
 pub mod board;
 pub mod cli;
 pub mod daemon;

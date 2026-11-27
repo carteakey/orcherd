@@ -73,7 +73,7 @@ ORCHERD skills get orcherd --reference references/<file>.md
 | Branch / Situation | Reference |
 | --- | --- |
 | Task DAGs (`--deps`), backlog-first loop, tiered diff review, `AUTHORIZED: push` | `references/supervisor-loop.md` |
-| Persistent seats, warm OAuth reuse, templates (`review-crew`, `studio-crew`), A/B cuts | `references/seats-and-templates.md` |
+| Persistent seats, warm OAuth reuse, templates (`review-crew`, `studio-crew`), `.orcherd.toml` `[agents.<id>]` argv overrides, A/B cuts | `references/seats-and-templates.md` |
 | Child worktrees, `.env`/`.venv` bootstrap symlinks, remote `hc` machines (`--on`) | `references/placement-and-remote.md` |
 | Bulletin vs. `send`, `@all`/`@idle` groups, decision gates, role/removal approvals | `references/messaging-and-gates.md` |
 | Blocked auth/permission dialogs, circuit breaker, `stop`/`abandon`/`release`/`--resume` | `references/recovery-and-cleanup.md` |

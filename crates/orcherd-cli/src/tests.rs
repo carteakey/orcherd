@@ -314,20 +314,132 @@ fn daemon_notice_auto_escalates_on_blocked_and_unexpected_exit() {
 
 #[test]
 fn antigravity_seats_launch_agy_without_permission_prompts() {
-    use crate::cli::build_agent_argv;
+    use crate::agent_argv::build_agent_argv;
+    use std::collections::BTreeMap;
+
+    let none = BTreeMap::new();
     assert_eq!(
-        build_agent_argv("antigravity", Some("gemini-4-neon-high"), None),
+        build_agent_argv("antigravity", Some("gemini-4-neon-high"), None, &none),
         ["agy", "--dangerously-skip-permissions", "--model", "gemini-4-neon-high"]
     );
     assert_eq!(
-        build_agent_argv("agy", None, Some("latest")),
+        build_agent_argv("agy", None, Some("latest"), &none),
         ["agy", "--dangerously-skip-permissions", "--continue"]
     );
     assert_eq!(
-        build_agent_argv("antigravity", None, Some("conv-1")),
+        build_agent_argv("antigravity", None, Some("conv-1"), &none),
         ["agy", "--dangerously-skip-permissions", "--resume", "conv-1"]
     );
-    assert_eq!(build_agent_argv("claude", None, Some("latest")), ["claude", "--resume"]);
+    assert_eq!(
+        build_agent_argv("claude", None, Some("latest"), &none),
+        ["claude", "--resume"]
+    );
+}
+
+#[test]
+fn orcherd_toml_agent_argv_overrides_base_and_appends_model_and_resume() {
+    use crate::agent_argv::build_agent_argv;
+
+    let tmp = TempDir::new().unwrap();
+
+    // Without `.orcherd.toml`, built-in defaults are unchanged.
+    let empty_cfg = worktree::load_project_config(tmp.path()).unwrap();
+    assert!(empty_cfg.agents.is_empty());
+    assert_eq!(
+        build_agent_argv("antigravity", Some("m1"), Some("latest"), &empty_cfg.agents),
+        ["agy", "--dangerously-skip-permissions", "--model", "m1", "--continue"]
+    );
+    assert_eq!(
+        build_agent_argv("codex", None, None, &empty_cfg.agents),
+        ["codex"]
+    );
+
+    fs::write(
+        tmp.path().join(".orcherd.toml"),
+        r#"
+[team]
+name = "demo"
+
+[agents.antigravity]
+argv = ["/opt/bin/agy", "--custom-flag"]
+
+[agents.claude]
+argv = ["claude", "--dangerously-skip-permissions"]
+
+[agents.codex]
+"#,
+    )
+    .unwrap();
+
+    let cfg = worktree::load_project_config(tmp.path()).unwrap();
+    assert_eq!(
+        build_agent_argv(
+            "antigravity",
+            Some("gemini-4-neon-high"),
+            Some("latest"),
+            &cfg.agents,
+        ),
+        ["/opt/bin/agy", "--custom-flag", "--model", "gemini-4-neon-high", "--continue"]
+    );
+    // Harness aliases resolve to their canonical `[agents.<id>]` entry when no exact key exists.
+    assert_eq!(
+        build_agent_argv("agy", None, Some("conv-9"), &cfg.agents),
+        ["/opt/bin/agy", "--custom-flag", "--resume", "conv-9"]
+    );
+    assert_eq!(
+        build_agent_argv("claude", Some("opus"), Some("latest"), &cfg.agents),
+        ["claude", "--dangerously-skip-permissions", "--model", "opus", "--resume"]
+    );
+    assert_eq!(
+        build_agent_argv("claude", None, Some("sess-1"), &cfg.agents),
+        ["claude", "--dangerously-skip-permissions", "--resume", "sess-1"]
+    );
+    // An agent table without `argv` or an unlisted agent keeps the built-in base.
+    assert_eq!(
+        build_agent_argv("codex", Some("o3"), None, &cfg.agents),
+        ["codex", "--model", "o3"]
+    );
+    assert_eq!(
+        build_agent_argv("zcode", None, None, &cfg.agents),
+        ["zcode"]
+    );
+
+    // An exact `[agents.agy]` entry wins over `[agents.antigravity]` when spawning `--agent agy`.
+    fs::write(
+        tmp.path().join(".orcherd.toml"),
+        r#"
+[agents.antigravity]
+argv = ["agy", "--from-canonical"]
+
+[agents.agy]
+argv = ["custom-wrapper", "--from-exact"]
+"#,
+    )
+    .unwrap();
+    let cfg = worktree::load_project_config(tmp.path()).unwrap();
+    assert_eq!(
+        build_agent_argv("agy", None, Some("latest"), &cfg.agents),
+        ["custom-wrapper", "--from-exact", "--resume"]
+    );
+    assert_eq!(
+        build_agent_argv("antigravity", None, Some("latest"), &cfg.agents),
+        ["agy", "--from-canonical", "--continue"]
+    );
+
+    // Empty or blank `argv` overrides are rejected on config load.
+    fs::write(
+        tmp.path().join(".orcherd.toml"),
+        "[agents.antigravity]\nargv = []\n",
+    )
+    .unwrap();
+    assert!(worktree::load_project_config(tmp.path()).is_err());
+
+    fs::write(
+        tmp.path().join(".orcherd.toml"),
+        "[agents.antigravity]\nargv = [\"  \"]\n",
+    )
+    .unwrap();
+    assert!(worktree::load_project_config(tmp.path()).is_err());
 }
 
 #[test]
