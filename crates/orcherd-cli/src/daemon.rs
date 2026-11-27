@@ -10,10 +10,10 @@ use orcherd_core::{
     TeamProjection, format_doorbell,
 };
 use orcherd_hc::{
-    Core, Endpoint, Error as HcError,
+    Core, Error as HcError,
     event::{Notice, TerminalChange},
     new_command,
-    wire::{BLOCKED, STATUS_MISMATCH, SendText, StatusState},
+    wire::{BLOCKED, STATUS_MISMATCH, SendText, Sent, StatusState, Terminal},
 };
 use serde::Serialize;
 use std::{
@@ -231,6 +231,113 @@ fn record_doorbell(store: &mut Store, actor: &Actor, team_id: &str, seat: &str, 
         })
         .with_team(team_id),
     );
+}
+
+/// Delivers a single doorbell to `(team_id, seat_name)` when no daemon is
+/// running for `state_dir`. When a daemon is running, it wakes on SQLite's
+/// `data_version` and owns delivery, preventing concurrent duplicate doorbells
+/// and spurious cross-team `exited` strikes from `orcherd spawn`.
+pub fn ring_seat_if_no_daemon(
+    store: &mut Store,
+    state_dir: &Path,
+    core: &Core,
+    team_id: &str,
+    seat_name: &str,
+) -> Result<bool, String> {
+    ring_seat_if_no_daemon_with(
+        store,
+        state_dir,
+        team_id,
+        seat_name,
+        || core.list(false).ok().map(|l| l.terminals),
+        |send| core.send(send),
+    )
+}
+
+pub(crate) fn ring_seat_if_no_daemon_with<L, S>(
+    store: &mut Store,
+    state_dir: &Path,
+    team_id: &str,
+    seat_name: &str,
+    list_terminals: L,
+    send_text: S,
+) -> Result<bool, String>
+where
+    L: FnOnce() -> Option<Vec<Terminal>>,
+    S: FnOnce(&SendText<'_>) -> orcherd_hc::Result<Sent>,
+{
+    if status(state_dir).running {
+        return Ok(false);
+    }
+    let proj = store
+        .team_projection(team_id)
+        .map_err(|e| format!("failed to load projection for `{team_id}`: {e}"))?;
+    if proj.team.paused_at.is_some() {
+        return Ok(false);
+    }
+    let Some(seat) = proj.seats.iter().find(|s| s.name == seat_name) else {
+        return Ok(false);
+    };
+    if seat.paused_at.is_some() {
+        return Ok(false);
+    }
+    let Address::Core {
+        ref machine,
+        ref terminal,
+    } = seat.address
+    else {
+        return Ok(false);
+    };
+    let target_address = match machine {
+        Some(m) if !terminal.contains('/') => format!("{m}/{terminal}"),
+        _ => terminal.clone(),
+    };
+    let undelivered = store
+        .list_undelivered_inbox(team_id, &seat.name)
+        .map_err(|e| format!("failed listing undelivered inbox: {e}"))?;
+    let Some(latest) = undelivered.last() else {
+        return Ok(false);
+    };
+    let listed = list_terminals();
+    let record = listed.as_ref().and_then(|terms| {
+        terms
+            .iter()
+            .find(|r| r.address == target_address || r.address == *terminal)
+    });
+    if let Some(record) = record
+        && record.foreground.is_some()
+        && !orcherd_hc::reply::agent_in_front(record, &seat.agent)
+    {
+        return Ok(false);
+    }
+    let state = record.and_then(|r| r.status.as_ref()).map(|st| st.state);
+    let only_if = match ring_condition(state) {
+        Ring::Wait => return Ok(false),
+        Ring::IfIdle => Some("idle"),
+        Ring::Now => None,
+    };
+    let doorbell_line = format_doorbell(undelivered.len(), latest.kind, &latest.ref_id);
+    let Ok(sent) = send_text(&SendText {
+        force: false,
+        only_if,
+        terminal: &target_address,
+        text: &doorbell_line,
+    }) else {
+        return Ok(false);
+    };
+    if sent.started == Some(false) {
+        return Ok(false);
+    }
+    let outcome = if sent.started == Some(true) {
+        DoorbellOutcome::Confirmed
+    } else {
+        DoorbellOutcome::Unconfirmed
+    };
+    let actor = Actor::Human {
+        terminal: Some("orcherd-daemon".to_owned()),
+    };
+    record_doorbell(store, &actor, team_id, &seat.name, latest.seq, outcome);
+    Ok(true)
 }
 
 /// Runs one delivery and escalation pass across all teams in `store`, using `core` when available.
@@ -532,13 +639,11 @@ pub fn run_foreground(once: bool) -> Result<(), String> {
     let mut store =
         Store::open(&db_path).map_err(|e| format!("failed to open `{}`: {e}", db_path.display()))?;
 
-    let core = Endpoint::resolve_env()
-        .ok()
-        .and_then(|ep| Core::connect(&ep).ok());
-    let mut subscription = core.as_ref().and_then(|c| c.subscribe().ok());
+    let mut link = crate::core_link::CoreLink::default();
+    let _ = link.ensure_live(Instant::now());
 
     if once {
-        let _ = tick_once(&mut store, core.as_ref(), &mut RingBackoff::default())?;
+        let _ = tick_once(&mut store, link.core(), &mut RingBackoff::default())?;
         return Ok(());
     }
 
@@ -572,25 +677,29 @@ pub fn run_foreground(once: bool) -> Result<(), String> {
             }
         }
 
-        let mut woke_by_event = false;
-        if let Some(ref mut sub) = subscription
-            && let Ok(notices) = sub.next(Duration::from_millis(20))
-        {
-            for notice in notices {
-                if matches!(
-                    notice,
-                    Notice::Event(ref ev)
+        let mut woke_by_event = link.ensure_live(Instant::now());
+        if let Some(sub) = link.subscription_mut() {
+            match sub.next(Duration::from_millis(20)) {
+                Ok(notices) => {
+                    for notice in notices {
                         if matches!(
-                            ev.change,
-                            TerminalChange::Status {
-                                status: Some(ref s),
-                                ..
-                            } if matches!(s.state, StatusState::Idle | StatusState::Done)
-                        )
-                ) {
-                    woke_by_event = true;
+                            notice,
+                            Notice::Event(ref ev)
+                                if matches!(
+                                    ev.change,
+                                    TerminalChange::Status {
+                                        status: Some(ref s),
+                                        ..
+                                    } if matches!(s.state, StatusState::Idle | StatusState::Done)
+                                )
+                        ) {
+                            woke_by_event = true;
+                        }
+                        handle_core_notice(&mut store, &mut backoff, notice, Instant::now());
+                    }
                 }
-                handle_core_notice(&mut store, &mut backoff, notice, Instant::now());
+                Err(HcError::Lost) => link.disconnect(),
+                Err(_) => {}
             }
         }
         if backoff.flush_pending_blocks(&mut store, Instant::now()) > 0 {
@@ -605,7 +714,10 @@ pub fn run_foreground(once: bool) -> Result<(), String> {
             || current_dv != last_data_version
             || last_tick.elapsed() >= Duration::from_secs(2)
         {
-            let _ = tick_once(&mut store, core.as_ref(), &mut backoff);
+            let _ = tick_once(&mut store, link.core(), &mut backoff);
+            if link.core().is_some_and(Core::is_lost) {
+                link.disconnect();
+            }
             last_data_version = store.data_version().unwrap_or(current_dv);
             last_tick = Instant::now();
         }

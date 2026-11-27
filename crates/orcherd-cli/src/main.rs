@@ -16,6 +16,7 @@ pub mod agent_argv;
 pub mod agy_trust;
 pub mod board;
 pub mod cli;
+pub mod core_link;
 pub mod daemon;
 pub mod freeze;
 pub mod herdr_space;
@@ -34,6 +35,8 @@ pub mod worktree;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_daemon;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

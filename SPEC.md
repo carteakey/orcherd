@@ -356,7 +356,7 @@ CREATE INDEX idx_audit_team_seq ON audit(team_id, seq);
 One `orcherd daemon` process runs per database file, holding `<state_dir>/orcherd/daemon.lock`. `orcherd init` and `orcherd spawn` auto-start it detached if no process holds the lock. When the `orcherd` binary on disk is replaced (an install or deploy), the daemon re-executes the new one in place within about 10 s, keeping its pid and the lock. A replacement must be unchanged across two 5 s checks and pass `--version` first, so a copy in progress or a broken build never takes over.
 
 ### 5.1 Event-Driven Delivery over `herdr-core`
-The daemon connects to `herdr-core` (`orcherd_hc::Core`) and subscribes to `events.subscribe`:
+The daemon connects to `herdr-core` (`orcherd_hc::Core`) and subscribes to `events.subscribe`. If `herdr-core` is not yet running when the daemon starts (for example, `orcherd init` before `spawn`) or restarts while the daemon is live, the daemon reconnects and re-subscribes automatically with exponential backoff (1 s up to 30 s) and ticks immediately once connected:
 
 1. **Trigger Events**:
    - `TerminalChange::Status { status: Some(Status { state: StatusState::Idle, .. }), .. }`: Immediately checks if the seat owning that terminal has undelivered `inbox` rows.

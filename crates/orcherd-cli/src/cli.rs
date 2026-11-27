@@ -716,7 +716,13 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
                 .map_err(|e| e.to_string())?;
         } else if warm_reuse {
             if let Ok(ref core) = core_res {
-                let _ = daemon::tick_once(&mut store, Some(core), &mut daemon::RingBackoff::default());
+                let _ = daemon::ring_seat_if_no_daemon(
+                    &mut store,
+                    &state_dir,
+                    core,
+                    &team.team_id,
+                    &seat_name_cloned,
+                );
             }
         } else if !no_launch {
             if let Some(ref m) = machine {
@@ -822,7 +828,13 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
                                         terminal.address, terminal.address
                                     ));
                                 }
-                                let _ = daemon::tick_once(&mut store, Some(&core), &mut daemon::RingBackoff::default());
+                                let _ = daemon::ring_seat_if_no_daemon(
+                                    &mut store,
+                                    &state_dir,
+                                    &core,
+                                    &team.team_id,
+                                    &seat_name_cloned,
+                                );
                             }
                         }
                         Err(err) => {
