@@ -1,7 +1,7 @@
 //! CLI argument parser and command dispatcher (`SPEC.md` §8).
 
 use crate::{
-    agent_argv,
+    agent_argv, agy_trust,
     board::{
         handle_approve, handle_ask, handle_bulletin, handle_done, handle_finding, handle_gate,
         handle_inbox, handle_log, handle_reply, handle_seat, handle_send, handle_task,
@@ -725,6 +725,7 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
 
     let mut receipt = store.apply(&actor, env_req).map_err(|e| e.to_string())?;
     let mut spawn_model_check = None;
+    let mut trust_note = None;
 
     if let ReceiptData::SpawnPrepared {
         ref seat,
@@ -798,6 +799,9 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
                         labels.insert(herdr_space::SPACE_LABEL, space.as_str());
                     }
 
+                    trust_note = agy_trust::maybe_inherit_worktree_trust(
+                        &seat_agent_cloned, &wt_spec, Path::new(&team.workspace_root), &prepared_wt.path, machine.as_deref(),
+                    );
                     let argv = agent_argv::build_agent_argv(
                         &seat_agent_cloned,
                         seat_model_cloned.as_deref(),
@@ -899,6 +903,7 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
     {
         *r_seat = updated_seat;
     }
+    agy_trust::append_note(&mut receipt, trust_note);
     if let Some(warning) = prepared_wt.warning {
         receipt.next = Some(match receipt.next.take() {
             Some(existing) if !existing.trim().is_empty() => format!("{warning}. {existing}"),

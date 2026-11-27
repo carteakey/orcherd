@@ -13,6 +13,7 @@ macro_rules! out {
 }
 
 pub mod agent_argv;
+pub mod agy_trust;
 pub mod board;
 pub mod cli;
 pub mod daemon;

@@ -11,7 +11,7 @@ Choose `--worktree` based on file ownership and isolation needs:
 
 ### Bootstrap symlinks for fresh worktrees
 
-Git worktrees do not carry git-ignored files (`.env`, `.venv`, `node_modules`, local media caches). When `orcherd spawn` creates a `new-child` or `new-top-level` worktree, it reads `bootstrap_symlinks` from `.orcherd.toml` (or the team record) and symlinks each listed relative path from the root checkout into the new worktree before starting the agent terminal.
+Git worktrees do not carry git-ignored files (`.env`, `.venv`, `node_modules`, local media caches). When `orcherd spawn` creates a `new-child` or `new-top-level` worktree, it reads `bootstrap_symlinks` from `.orcherd.toml` (or the team record) and symlinks each listed relative path from the root checkout into the new worktree before starting the agent terminal. For local Antigravity (`agy`) seats in `new-child`/`new-top-level` worktrees, `orcherd` also inherits `trustedWorkspaces` from `workspace_root` in `~/.gemini/antigravity-cli/settings.json` when the parent repo is already trusted (leaving untrusted roots and remote seats untouched with a `next` note).
 
 Never run `git init` in an existing user folder, and let `orcherd spawn` create and bootstrap worktrees rather than running raw `git worktree add` by hand.
 

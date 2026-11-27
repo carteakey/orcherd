@@ -134,7 +134,7 @@ bootstrap_copies = []
 argv = ["agy", "--dangerously-skip-permissions"]
 ```
 
-Other placements: `current`, `new-top-level`, `path:<dir>`.
+Other placements: `current`, `new-top-level`, `path:<dir>`. For local Antigravity (`agy`) seats in `new-child`/`new-top-level` worktrees, `orcherd` inherits `trustedWorkspaces` from the parent repo when it is already trusted.
 
 ## Other machines
 
