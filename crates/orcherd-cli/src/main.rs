@@ -28,6 +28,7 @@ pub mod preflight;
 pub mod remote;
 pub mod self_update;
 pub mod skills;
+pub mod spawn;
 pub mod spawn_replay;
 pub mod stall;
 pub mod tunnel;
