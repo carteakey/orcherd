@@ -6,8 +6,8 @@
 use tempfile::tempdir;
 
 use crate::{
-    Actor, DoneOutcome, Error, InboxKind, Op, ReceiptData, RequestEnvelope, Store, Task, TaskStatus,
-    TemplateKind, VerdictKind,
+    Actor, DispatchState, DoneOutcome, DoorbellOutcome, Error, InboxKind, Op, ReceiptData,
+    RequestEnvelope, Store, Task, TaskStatus, TemplateKind, VerdictKind,
 };
 
 fn human() -> Actor {
@@ -171,4 +171,138 @@ fn a_standing_brief_is_sent_now_and_again_on_every_fresh_launch() {
         .unwrap();
     let again = unread(&store, &team_id, "vicesuper");
     assert!(again.iter().any(|i| i.subject == "Your standing brief" && i.body.contains("RUBRIC.md")), "{again:?}");
+}
+
+#[test]
+fn blocked_supervisor_never_self_escalates() {
+    let (_dir, mut store, team_id) = team();
+
+    store
+        .apply(
+            &human(),
+            RequestEnvelope::new(Op::DaemonEscalate {
+                seat: "super".to_string(),
+                dispatch_id: None,
+                stop_reason: "blocked".to_string(),
+                detail: "seat `super` blocked on question: Proceed?".to_string(),
+            }),
+        )
+        .unwrap();
+
+    store
+        .apply(
+            &human(),
+            RequestEnvelope::new(Op::DaemonRecordDoorbell {
+                seat: "super".to_string(),
+                rung_through_seq: 1,
+                outcome: DoorbellOutcome::Blocked,
+            }),
+        )
+        .unwrap();
+
+    let items = unread(&store, &team_id, "super");
+    assert!(
+        items.iter().all(|i| i.kind != InboxKind::Escalation),
+        "blocked supervisor must never write an escalation into its own inbox: {items:?}"
+    );
+}
+
+#[test]
+fn blocked_seat_produces_one_escalation_and_preserves_strike_counting() {
+    let (_dir, mut store, team_id) = team();
+
+    let ReceiptData::SpawnPrepared { dispatch: Some(disp), .. } = store
+        .apply(
+            &seat("super"),
+            RequestEnvelope::new(Op::SpawnPrepare {
+                seat: "zcode1".to_string(),
+                role: None,
+                agent: Some("antigravity".to_string()),
+                model: None,
+                account: None,
+                effort: None,
+                worktree_path: None,
+                branch: None,
+                machine: None,
+                task_id: None,
+                spec: Some("Fix #11".to_string()),
+                title: Some("Fix #11".to_string()),
+                keep_open: None,
+                resume_session: None,
+                retry_of: None,
+            }),
+        )
+        .unwrap()
+        .data
+    else {
+        panic!("expected SpawnPrepared with dispatch");
+    };
+
+    // Both doorbell refusal and status notice for the same block must yield one escalation.
+    store
+        .apply(
+            &human(),
+            RequestEnvelope::new(Op::DaemonRecordDoorbell {
+                seat: "zcode1".to_string(),
+                rung_through_seq: 1,
+                outcome: DoorbellOutcome::Blocked,
+            }),
+        )
+        .unwrap();
+    let ReceiptData::Dispatch(after_block) = store
+        .apply(
+            &human(),
+            RequestEnvelope::new(Op::DaemonEscalate {
+                seat: "zcode1".to_string(),
+                dispatch_id: Some(disp.dispatch_id.clone()),
+                stop_reason: "blocked".to_string(),
+                detail: "seat `zcode1` blocked on permission: Trust this folder?".to_string(),
+            }),
+        )
+        .unwrap()
+        .data
+    else {
+        panic!("expected Dispatch");
+    };
+    // A second blocked escalation for the same dispatch deduplicates cleanly.
+    store
+        .apply(
+            &human(),
+            RequestEnvelope::new(Op::DaemonEscalate {
+                seat: "zcode1".to_string(),
+                dispatch_id: Some(disp.dispatch_id.clone()),
+                stop_reason: "blocked".to_string(),
+                detail: "terminal `t4` is blocked on a dialog: blocked".to_string(),
+            }),
+        )
+        .unwrap();
+
+    let escalations: Vec<_> = unread(&store, &team_id, "super")
+        .into_iter()
+        .filter(|i| i.kind == InboxKind::Escalation)
+        .collect();
+    assert_eq!(escalations.len(), 1, "one block must produce one escalation: {escalations:?}");
+    assert_eq!(escalations[0].ref_id, disp.dispatch_id);
+    assert!(escalations[0].body.contains("Trust this folder?"));
+    assert_eq!(after_block.stop_reason.as_deref(), Some("blocked"));
+    assert_eq!(after_block.failure_count, 0, "blocking must not spend a failure strike");
+
+    // A real crash afterwards still increments strike count and settles the dispatch as failed.
+    let ReceiptData::Dispatch(after_exit) = store
+        .apply(
+            &human(),
+            RequestEnvelope::new(Op::DaemonEscalate {
+                seat: "zcode1".to_string(),
+                dispatch_id: Some(disp.dispatch_id),
+                stop_reason: "exited".to_string(),
+                detail: "exit 1".to_string(),
+            }),
+        )
+        .unwrap()
+        .data
+    else {
+        panic!("expected Dispatch");
+    };
+    assert_eq!(after_exit.failure_count, 1);
+    assert_eq!(after_exit.state, DispatchState::SettledFailed);
 }

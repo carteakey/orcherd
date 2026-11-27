@@ -11,7 +11,10 @@ use orcherd_hc::{
     event::{Ended, Event, Notice, TerminalChange},
     wire::{Status, StatusState},
 };
-use std::fs;
+use std::{
+    fs,
+    time::{Duration, Instant},
+};
 use tempfile::TempDir;
 
 #[test]
@@ -230,11 +233,34 @@ fn daemon_notice_auto_escalates_on_blocked_and_unexpected_exit() {
         )
         .unwrap();
 
-    // Simulate herdr-core emitting StatusState::Blocked (auth dialog) on t4.
+    // Simulate herdr-core reporting t4 active, then StatusState::Blocked (auth dialog).
+    let mut backoff = daemon::RingBackoff::default();
+    let t0 = Instant::now();
     daemon::handle_core_notice(
         &mut store,
+        &mut backoff,
         Notice::Event(Event {
             seq: 1,
+            terminal: "t4".to_owned(),
+            change: TerminalChange::Status {
+                reported: true,
+                status: Some(Status {
+                    app: "antigravity".to_owned(),
+                    kind: None,
+                    msg: String::new(),
+                    progress: None,
+                    state: StatusState::Working,
+                    title: String::new(),
+                }),
+            },
+        }),
+        t0,
+    );
+    daemon::handle_core_notice(
+        &mut store,
+        &mut backoff,
+        Notice::Event(Event {
+            seq: 2,
             terminal: "t4".to_owned(),
             change: TerminalChange::Status {
                 reported: true,
@@ -248,6 +274,7 @@ fn daemon_notice_auto_escalates_on_blocked_and_unexpected_exit() {
                 }),
             },
         }),
+        t0 + Duration::from_secs(1),
     );
 
     // Director's inbox must now contain the auto-escalation item.
@@ -280,8 +307,9 @@ fn daemon_notice_auto_escalates_on_blocked_and_unexpected_exit() {
     // Now simulate t4 exiting unexpectedly before calling `orcherd done`.
     daemon::handle_core_notice(
         &mut store,
+        &mut backoff,
         Notice::Event(Event {
-            seq: 2,
+            seq: 3,
             terminal: "t4".to_owned(),
             change: TerminalChange::Finished(Ended {
                 exit_code: Some(1),
@@ -289,6 +317,7 @@ fn daemon_notice_auto_escalates_on_blocked_and_unexpected_exit() {
                 signal: None,
             }),
         }),
+        t0 + Duration::from_secs(2),
     );
 
     let inbox2 = store
@@ -310,6 +339,89 @@ fn daemon_notice_auto_escalates_on_blocked_and_unexpected_exit() {
             .iter()
             .any(|i| i.kind == orcherd_core::InboxKind::Escalation && i.body.contains("exited"))
     );
+}
+
+#[test]
+fn daemon_startup_grace_and_supervisor_self_escalation_guard() {
+    let mut store = Store::open_in_memory().unwrap();
+    let human = Actor::Human { terminal: None };
+    store
+        .apply(
+            &human,
+            RequestEnvelope::new(Op::Init {
+                name: "ksquared".to_owned(),
+                template: Some(TemplateKind::StudioCrew),
+                goal: Some("Escalation hygiene".to_owned()),
+                workspace_root: "/tmp/ksquared".to_owned(),
+                bootstrap_symlinks: Vec::new(),
+                bootstrap_copies: Vec::new(),
+            }),
+        )
+        .unwrap();
+
+    for (seat, term) in [("director", "t1"), ("builder-a", "t4"), ("builder-b", "t5")] {
+        store
+            .apply(
+                &human,
+                RequestEnvelope::new(Op::SeatRebind {
+                    seat: seat.to_owned(),
+                    address: Address::Core { machine: None, terminal: term.to_owned() },
+                })
+                .with_team("ksquared"),
+            )
+            .unwrap();
+    }
+
+    let status_ev = |seq, term: &str, state, kind: Option<&str>, msg: &str| {
+        Notice::Event(Event {
+            seq,
+            terminal: term.to_owned(),
+            change: TerminalChange::Status {
+                reported: true,
+                status: Some(Status {
+                    app: "antigravity".to_owned(),
+                    kind: kind.map(str::to_owned),
+                    msg: msg.to_owned(),
+                    progress: None,
+                    state,
+                    title: String::new(),
+                }),
+            },
+        })
+    };
+    let read_director = |store: &mut Store| {
+        let dir = Actor::Seat { team_id: None, seat_name: "director".to_owned(), terminal: None };
+        let ReceiptData::Inbox(items) = store
+            .apply(&dir, RequestEnvelope::new(Op::InboxRead { peek: false, seat: None, limit: None }).with_team("ksquared"))
+            .unwrap()
+            .data
+        else {
+            panic!("expected inbox");
+        };
+        items
+    };
+
+    let mut backoff = daemon::RingBackoff::default();
+    let t0 = Instant::now();
+
+    // 1. Transient startup auth blip on t4 clears to Working -> never escalates.
+    daemon::handle_core_notice(&mut store, &mut backoff, status_ev(1, "t4", StatusState::Blocked, Some("auth"), "Sign in required"), t0);
+    daemon::handle_core_notice(&mut store, &mut backoff, status_ev(2, "t4", StatusState::Working, None, ""), t0 + Duration::from_secs(3));
+
+    // 2. Supervisor blocked on a question for its human -> never self-escalates.
+    daemon::handle_core_notice(&mut store, &mut backoff, status_ev(3, "t1", StatusState::Working, None, ""), t0);
+    daemon::handle_core_notice(&mut store, &mut backoff, status_ev(4, "t1", StatusState::Blocked, Some("question"), "Ship it?"), t0 + Duration::from_secs(1));
+
+    // 3. Persistent startup block on t5 waits out STARTUP_GRACE, then escalates once.
+    daemon::handle_core_notice(&mut store, &mut backoff, status_ev(5, "t5", StatusState::Blocked, Some("auth"), "Sign in required"), t0);
+    assert_eq!(backoff.flush_pending_blocks(&mut store, t0 + Duration::from_secs(5)), 0);
+    assert!(read_director(&mut store).is_empty());
+
+    assert_eq!(backoff.flush_pending_blocks(&mut store, t0 + daemon::STARTUP_GRACE), 1);
+    let items = read_director(&mut store);
+    assert_eq!(items.len(), 1, "only t5's persistent block should escalate: {items:?}");
+    assert_eq!(items[0].kind, orcherd_core::InboxKind::Escalation);
+    assert!(items[0].body.contains("builder-b") && items[0].body.contains("Sign in required"));
 }
 
 #[test]

@@ -6,8 +6,8 @@ use crate::{
     tunnel::remove_stale_socket,
 };
 use orcherd_core::{
-    Actor, Address, DispatchState, DoorbellOutcome, Op, RequestEnvelope, Store, TeamProjection,
-    format_doorbell,
+    Actor, Address, DispatchState, DoorbellOutcome, Op, RequestEnvelope, Seat, SeatRole, Store,
+    TeamProjection, format_doorbell,
 };
 use orcherd_hc::{
     Core, Endpoint, Error as HcError,
@@ -17,7 +17,7 @@ use orcherd_hc::{
 };
 use serde::Serialize;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
     process::Stdio,
@@ -95,6 +95,10 @@ pub fn stop(state_dir: &Path) -> Result<DaemonStatus, String> {
 /// How long a doorbell may be refused before the supervisor hears about it once.
 const ESCALATE_AFTER: Duration = Duration::from_secs(60);
 
+/// How long a newly seen terminal may report `blocked` during startup (e.g. while
+/// `agy` loads its token source) before the daemon escalates it.
+pub const STARTUP_GRACE: Duration = Duration::from_secs(15);
+
 /// When to ring a seat, from the status its harness reports to herdr-core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ring {
@@ -117,12 +121,16 @@ pub fn ring_condition(state: Option<StatusState>) -> Ring {
     }
 }
 
-/// Per-seat memory of refused rings, kept by the daemon instead of the store so a seat
-/// that can't take its doorbell doesn't write an audit row every tick.
+/// Per-seat memory of refused rings and startup-grace blocks, kept by the daemon
+/// instead of the store so transient blips don't write audit rows or false escalations.
 #[derive(Debug, Default)]
 pub struct RingBackoff {
     refused_since: BTreeMap<(String, String), Instant>,
-    escalated: std::collections::BTreeSet<(String, String)>,
+    escalated: BTreeSet<(String, String)>,
+    /// Terminals already seen `working`, `idle`, or `done` (past startup grace).
+    ready_terminals: BTreeSet<String>,
+    /// Startup `blocked` notices waiting out `STARTUP_GRACE`, keyed by terminal address.
+    pending_blocks: BTreeMap<String, (Instant, String)>,
 }
 
 impl RingBackoff {
@@ -139,6 +147,74 @@ impl RingBackoff {
     fn clear(&mut self, key: &(String, String)) {
         self.refused_since.remove(key);
         self.escalated.remove(key);
+    }
+
+    fn mark_ready(&mut self, terminal: &str) {
+        self.pending_blocks.remove(terminal);
+        self.ready_terminals.insert(terminal.to_owned());
+    }
+
+    /// True if `terminal` is past startup grace (already seen ready, or first seen
+    /// blocked at least `STARTUP_GRACE` ago); otherwise records/keeps its start time.
+    fn block_grace_elapsed(&mut self, terminal: &str, detail: String, now: Instant) -> bool {
+        if self.ready_terminals.contains(terminal) {
+            return true;
+        }
+        let since = self.pending_blocks.entry(terminal.to_owned()).or_insert((now, detail)).0;
+        if now.saturating_duration_since(since) >= STARTUP_GRACE {
+            self.pending_blocks.remove(terminal);
+            self.ready_terminals.insert(terminal.to_owned());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Escalates any deferred startup `blocked` notices whose grace period has elapsed.
+    pub fn flush_pending_blocks(&mut self, store: &mut Store, now: Instant) -> usize {
+        let due: Vec<String> = self
+            .pending_blocks
+            .iter()
+            .filter(|(_, (since, _))| now.saturating_duration_since(*since) >= STARTUP_GRACE)
+            .map(|(terminal, _)| terminal.clone())
+            .collect();
+        if due.is_empty() {
+            return 0;
+        }
+        let Ok(team_ids) = list_all_team_ids(store) else {
+            return 0;
+        };
+        let actor = Actor::Human {
+            terminal: Some("orcherd-daemon".to_owned()),
+        };
+        let mut escalated = 0usize;
+        for terminal in due {
+            let Some((_, detail)) = self.pending_blocks.remove(&terminal) else {
+                continue;
+            };
+            self.ready_terminals.insert(terminal.clone());
+            for team_id in &team_ids {
+                let Ok(proj) = store.team_projection(team_id) else {
+                    continue;
+                };
+                for seat in &proj.seats {
+                    if seat.role != SeatRole::Supervisor && seat_matches_terminal(seat, &terminal) {
+                        let _ = store.apply(
+                            &actor,
+                            RequestEnvelope::new(Op::DaemonEscalate {
+                                seat: seat.name.clone(),
+                                dispatch_id: active_dispatch_for_seat(&proj, &seat.seat_id),
+                                stop_reason: "blocked".to_owned(),
+                                detail: detail.clone(),
+                            })
+                            .with_team(team_id),
+                        );
+                        escalated += 1;
+                    }
+                }
+            }
+        }
+        escalated
     }
 }
 
@@ -248,6 +324,9 @@ pub fn tick_once(
             }
 
             let state = record.and_then(|r| r.status.as_ref()).map(|st| st.state);
+            if matches!(state, Some(StatusState::Working | StatusState::Idle | StatusState::Done)) {
+                backoff.mark_ready(&target_address);
+            }
             let only_if = match ring_condition(state) {
                 Ring::Wait => continue,
                 Ring::IfIdle => Some("idle"),
@@ -271,6 +350,7 @@ pub fn tick_once(
                     };
                     record_doorbell(store, &actor, &team_id, &seat.name, max_seq, outcome);
                     backoff.clear(&key);
+                    backoff.mark_ready(&target_address);
                     deliveries += 1;
                 }
                 Err(HcError::Refused {
@@ -278,20 +358,26 @@ pub fn tick_once(
                     ref message,
                     ..
                 }) if kind == BLOCKED => {
-                    if backoff.escalate_once(&key) {
-                        record_doorbell(store, &actor, &team_id, &seat.name, max_seq, DoorbellOutcome::Blocked);
-                        let _ = store.apply(
-                            &actor,
-                            RequestEnvelope::new(Op::DaemonEscalate {
-                                seat: seat.name.clone(),
-                                dispatch_id: active_dispatch_for_seat(&proj, &seat.seat_id),
-                                stop_reason: "blocked".to_owned(),
-                                detail: format!(
-                                    "terminal `{target_address}` is blocked on a dialog: {message}"
-                                ),
-                            })
-                            .with_team(&team_id),
-                        );
+                    // Supervisor dialogs are for the human operator; never self-escalate.
+                    // Check startup grace before consuming the one-shot escalation bit,
+                    // and escalate via DaemonEscalate alone so one block writes one inbox item.
+                    if seat.role != SeatRole::Supervisor {
+                        let detail =
+                            format!("terminal `{target_address}` is blocked on a dialog: {message}");
+                        if backoff.block_grace_elapsed(&target_address, detail.clone(), Instant::now())
+                            && backoff.escalate_once(&key)
+                        {
+                            let _ = store.apply(
+                                &actor,
+                                RequestEnvelope::new(Op::DaemonEscalate {
+                                    seat: seat.name.clone(),
+                                    dispatch_id: active_dispatch_for_seat(&proj, &seat.seat_id),
+                                    stop_reason: "blocked".to_owned(),
+                                    detail,
+                                })
+                                .with_team(&team_id),
+                            );
+                        }
                     }
                 }
                 refused => {
@@ -302,7 +388,10 @@ pub fn tick_once(
                         Ok(_) => DoorbellOutcome::StatusMismatch,
                         Err(_) => DoorbellOutcome::Unreachable,
                     };
-                    if backoff.stalled(&key) && backoff.escalate_once(&key) {
+                    if seat.role != SeatRole::Supervisor
+                        && backoff.stalled(&key)
+                        && backoff.escalate_once(&key)
+                    {
                         // Recording a failed outcome writes one escalation to the supervisor.
                         record_doorbell(store, &actor, &team_id, &seat.name, max_seq, outcome);
                     }
@@ -316,7 +405,12 @@ pub fn tick_once(
 
 /// Processes a `herdr-core` event notice and triggers auto-escalations when a
 /// managed seat terminal blocks on an auth/permission dialog or exits unexpectedly.
-pub fn handle_core_notice(store: &mut Store, notice: Notice) {
+pub fn handle_core_notice(
+    store: &mut Store,
+    backoff: &mut RingBackoff,
+    notice: Notice,
+    now: Instant,
+) {
     let Notice::Event(event) = notice else {
         return;
     };
@@ -332,18 +426,7 @@ pub fn handle_core_notice(store: &mut Store, notice: Notice) {
             continue;
         };
         for seat in &proj.seats {
-            let matches_terminal = match &seat.address {
-                Address::Core {
-                    machine: Some(m),
-                    terminal: t,
-                } => event.terminal == *t || event.terminal == format!("{m}/{t}"),
-                Address::Core {
-                    machine: None,
-                    terminal: t,
-                } => event.terminal == *t,
-                _ => false,
-            };
-            if !matches_terminal {
+            if !seat_matches_terminal(seat, &event.terminal) {
                 continue;
             }
 
@@ -352,22 +435,39 @@ pub fn handle_core_notice(store: &mut Store, notice: Notice) {
                     status: Some(status),
                     ..
                 } if status.state == StatusState::Blocked => {
+                    if seat.role == SeatRole::Supervisor {
+                        continue;
+                    }
                     let kind = status.kind.as_deref().unwrap_or("dialog");
-                    let _ = store.apply(
-                        &actor,
-                        RequestEnvelope::new(Op::DaemonEscalate {
-                            seat: seat.name.clone(),
-                            dispatch_id: active_dispatch_for_seat(&proj, &seat.seat_id),
-                            stop_reason: "blocked".to_owned(),
-                            detail: format!(
-                                "seat `{}` blocked on {kind}: {}",
-                                seat.name, status.msg
-                            ),
-                        })
-                        .with_team(&team_id),
-                    );
+                    let detail = format!("seat `{}` blocked on {kind}: {}", seat.name, status.msg);
+                    if backoff.block_grace_elapsed(&event.terminal, detail.clone(), now) {
+                        let _ = store.apply(
+                            &actor,
+                            RequestEnvelope::new(Op::DaemonEscalate {
+                                seat: seat.name.clone(),
+                                dispatch_id: active_dispatch_for_seat(&proj, &seat.seat_id),
+                                stop_reason: "blocked".to_owned(),
+                                detail,
+                            })
+                            .with_team(&team_id),
+                        );
+                    }
+                }
+                TerminalChange::Status {
+                    status: Some(status),
+                    ..
+                } if matches!(
+                    status.state,
+                    StatusState::Working | StatusState::Idle | StatusState::Done
+                ) =>
+                {
+                    backoff.mark_ready(&event.terminal);
+                }
+                TerminalChange::Status { .. } => {
+                    backoff.pending_blocks.remove(&event.terminal);
                 }
                 TerminalChange::Finished(ended) | TerminalChange::Lost(ended) => {
+                    backoff.pending_blocks.remove(&event.terminal);
                     if let Some(dispatch_id) = active_dispatch_for_seat(&proj, &seat.seat_id) {
                         let stop_reason = if matches!(event.change, TerminalChange::Lost(_)) {
                             "lost"
@@ -470,8 +570,11 @@ pub fn run_foreground(once: bool) -> Result<(), String> {
                 ) {
                     woke_by_event = true;
                 }
-                handle_core_notice(&mut store, notice);
+                handle_core_notice(&mut store, &mut backoff, notice, Instant::now());
             }
+        }
+        if backoff.flush_pending_blocks(&mut store, Instant::now()) > 0 {
+            woke_by_event = true;
         }
 
         let current_dv = store.data_version().unwrap_or(last_data_version);
@@ -495,6 +598,20 @@ fn publish_team_doc(core: &Core, proj: &TeamProjection) {
     };
     let version = core.doc_get(&doc_name).map(|d| d.version).unwrap_or(0);
     let _ = core.doc_set(&doc_name, &value, version);
+}
+
+fn seat_matches_terminal(seat: &Seat, terminal: &str) -> bool {
+    match &seat.address {
+        Address::Core {
+            machine: Some(m),
+            terminal: t,
+        } => terminal == *t || terminal == format!("{m}/{t}"),
+        Address::Core {
+            machine: None,
+            terminal: t,
+        } => terminal == *t,
+        _ => false,
+    }
 }
 
 fn active_dispatch_for_seat(proj: &TeamProjection, seat_id: &str) -> Option<String> {

@@ -835,27 +835,27 @@ fn exec_daemon_record_doorbell(conn: &Connection, team_id: &str, now: &str, seat
 
     if matches!(outcome, DoorbellOutcome::Confirmed | DoorbellOutcome::Unconfirmed) {
         conn.execute("UPDATE inbox SET delivered_at = COALESCE(delivered_at, ?1) WHERE team_id = ?2 AND to_seat = ?3 AND seq <= ?4", params![now, team_id, seat.name, rung_through_seq])?;
-    } else if outcome == DoorbellOutcome::Blocked {
-        let supervisor = find_supervisor_seat_name(conn, team_id)?;
-        write_dedup_escalation_inbox(conn, team_id, &supervisor, &seat.name, &seat.seat_id, &format!("Seat '{}' is blocked on a terminal prompt", seat.name), "Doorbell refused because seat terminal status is blocked.", now)?;
     } else if matches!(outcome, DoorbellOutcome::StatusMismatch | DoorbellOutcome::Unreachable) {
         // The daemon records these only after a seat has refused its doorbell for a while,
-        // so this is the supervisor's one notice that a handoff is stuck.
+        // so this is the supervisor's one notice that a handoff is stuck. Blocked escalations
+        // go through `DaemonEscalate` alone so one block never produces two inbox rows.
         let supervisor = find_supervisor_seat_name(conn, team_id)?;
-        write_dedup_escalation_inbox(
-            conn,
-            team_id,
-            &supervisor,
-            &seat.name,
-            &seat.seat_id,
-            &format!("Seat '{}' isn't taking its doorbell", seat.name),
-            &format!(
-                "Doorbell refused ({}) for over a minute; the seat has unread items it hasn't been told about. Check its terminal with `orcherd seat read {}`.",
-                outcome.as_str(),
-                seat.name
-            ),
-            now,
-        )?;
+        if seat.role != SeatRole::Supervisor && seat.name != supervisor {
+            write_dedup_escalation_inbox(
+                conn,
+                team_id,
+                &supervisor,
+                &seat.name,
+                &seat.seat_id,
+                &format!("Seat '{}' isn't taking its doorbell", seat.name),
+                &format!(
+                    "Doorbell refused ({}) for over a minute; the seat has unread items it hasn't been told about. Check its terminal with `orcherd seat read {}`.",
+                    outcome.as_str(),
+                    seat.name
+                ),
+                now,
+            )?;
+        }
     }
 
     let doorbell = get_doorbell(conn, team_id, &seat.seat_id)?.unwrap_or(Doorbell {
@@ -892,8 +892,10 @@ fn exec_daemon_escalate(conn: &Connection, team_id: &str, now: &str, seat_ref: &
             "INSERT INTO doorbell (team_id, seat_id, rung_through_seq, rung_at, attempts, outcome) VALUES (?1, ?2, 0, ?3, 1, 'blocked') ON CONFLICT(team_id, seat_id) DO UPDATE SET rung_at = excluded.rung_at, outcome = 'blocked'",
             params![team_id, seat.seat_id, now],
         )?;
-        let ref_id = target_dispatch.as_ref().map_or(seat.seat_id.as_str(), |d| d.dispatch_id.as_str());
-        write_dedup_escalation_inbox(conn, team_id, &supervisor, &seat.name, ref_id, &format!("Seat '{}' is blocked ({stop_reason})", seat.name), detail, now)?;
+        if seat.role != SeatRole::Supervisor && seat.name != supervisor {
+            let ref_id = target_dispatch.as_ref().map_or(seat.seat_id.as_str(), |d| d.dispatch_id.as_str());
+            write_dedup_escalation_inbox(conn, team_id, &supervisor, &seat.name, ref_id, &format!("Seat '{}' is blocked ({stop_reason})", seat.name), detail, now)?;
+        }
         if let Some(disp) = target_dispatch {
             conn.execute("UPDATE dispatches SET stop_reason = 'blocked', updated_at = ?1 WHERE dispatch_id = ?2", params![now, disp.dispatch_id])?;
             let updated = resolve_dispatch(conn, team_id, &disp.dispatch_id)?;
