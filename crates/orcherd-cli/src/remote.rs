@@ -6,10 +6,13 @@
 //! qualifies bare `HC_TERMINAL_ID=t7` as `<M>/t7`.
 
 use orcherd_core::{Actor, Receipt, RequestEnvelope, Store};
+use orcherd_hc::new_command;
 use serde::{Deserialize, Serialize};
 use std::{
+    env, fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
+    sync::OnceLock,
     time::Duration,
 };
 
@@ -25,6 +28,8 @@ pub struct RemoteRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteResponse {
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
     pub ok: bool,
     pub receipt: Option<Receipt>,
 }
@@ -111,10 +116,54 @@ pub fn send_remote_request(
         resp.receipt
             .ok_or_else(|| "remote server returned ok without receipt".to_owned())
     } else {
-        Err(resp
+        let raw_err = resp
             .error
-            .unwrap_or_else(|| "remote request failed".to_owned()))
+            .unwrap_or_else(|| "remote request failed".to_owned());
+        Err(format_remote_error(raw_err, resp.host.as_deref(), socket_path))
     }
+}
+
+/// Annotates `team not found` errors returned over a tunnel with the answering host and
+/// socket path so remote callers immediately see why a local team wasn't found there.
+pub(crate) fn format_remote_error(err: String, host: Option<&str>, socket_path: &Path) -> String {
+    if let Some(rest) = err.strip_prefix("team not found: ") {
+        let host = host
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("remote host");
+        return format!(
+            "team not found on {host} (via the tunnel at {}): {rest}; set ORCHERD_STATE_DIR or --team",
+            socket_path.display()
+        );
+    }
+    err
+}
+
+fn local_hostname() -> Option<String> {
+    static HOST: OnceLock<Option<String>> = OnceLock::new();
+    HOST.get_or_init(|| {
+        if let Ok(name) = fs::read_to_string("/proc/sys/kernel/hostname") {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_owned());
+            }
+        }
+        if let Ok(out) = new_command("hostname").output()
+            && out.status.success()
+        {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let trimmed = text.trim().trim_end_matches(".local");
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_owned());
+            }
+        }
+        env::var("HOSTNAME")
+            .or_else(|_| env::var("COMPUTERNAME"))
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+    })
+    .clone()
 }
 
 #[cfg(not(unix))]
@@ -136,6 +185,16 @@ pub fn handle_client_stream(
     stream: std::os::unix::net::UnixStream,
     socket_machine: Option<&str>,
 ) {
+    handle_client_stream_with_host(store, stream, socket_machine, local_hostname());
+}
+
+#[cfg(unix)]
+pub(crate) fn handle_client_stream_with_host(
+    store: &mut Store,
+    stream: std::os::unix::net::UnixStream,
+    socket_machine: Option<&str>,
+    host: Option<String>,
+) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
 
@@ -150,11 +209,13 @@ pub fn handle_client_stream(
                 match store.apply(&actor, req.envelope) {
                     Ok(receipt) => RemoteResponse {
                         ok: true,
+                        host,
                         receipt: Some(receipt),
                         error: None,
                     },
                     Err(err) => RemoteResponse {
                         ok: false,
+                        host,
                         receipt: None,
                         error: Some(err.to_string()),
                     },
@@ -162,12 +223,14 @@ pub fn handle_client_stream(
             }
             Err(err) => RemoteResponse {
                 ok: false,
+                host,
                 receipt: None,
                 error: Some(format!("invalid remote request JSON: {err}")),
             },
         },
         Err(err) => RemoteResponse {
             ok: false,
+            host,
             receipt: None,
             error: Some(format!("failed reading remote request: {err}")),
         },
@@ -193,4 +256,116 @@ pub fn tunnel_socket_without_local_team(state_dir: &Path, db_path: &Path) -> Opt
     let has_local_team = db_path.exists()
         && Store::open(db_path).is_ok_and(|store| store.resolve_team(None).is_ok());
     (!has_local_team).then_some(sock)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::build_seat_env;
+    use orcherd_core::Op;
+    use tempfile::TempDir;
+
+    #[test]
+    fn spawn_seat_env_inherits_non_default_state_dir_for_local_seats_only() {
+        let default_dir = Path::new("/home/u/.local/state/orcherd");
+        let custom_dir = Path::new("/home/u/.local/state/orcherd-somalog");
+
+        // Local seat with custom store inherits ORCHERD_STATE_DIR.
+        let local_custom = build_seat_env(
+            "/usr/local/bin/orcherd",
+            "team-1",
+            "w1",
+            Some("disp-1"),
+            None,
+            custom_dir,
+            default_dir,
+        );
+        assert_eq!(
+            local_custom.get("ORCHERD_STATE_DIR").map(String::as_str),
+            Some("/home/u/.local/state/orcherd-somalog")
+        );
+        assert!(!local_custom.contains_key("ORCHERD_REMOTE_SOCKET"));
+
+        // Local seat with default store omits ORCHERD_STATE_DIR.
+        let local_default = build_seat_env(
+            "/usr/local/bin/orcherd",
+            "team-1",
+            "w1",
+            None,
+            None,
+            default_dir,
+            default_dir,
+        );
+        assert!(!local_default.contains_key("ORCHERD_STATE_DIR"));
+
+        // Remote seat keeps the tunnel socket route even when local store is custom.
+        let remote = build_seat_env(
+            "/usr/local/bin/orcherd",
+            "team-1",
+            "w1",
+            Some("disp-1"),
+            Some("m1"),
+            custom_dir,
+            default_dir,
+        );
+        assert!(!remote.contains_key("ORCHERD_STATE_DIR"));
+        assert_eq!(remote.get("ORCHERD_MACHINE").map(String::as_str), Some("m1"));
+        assert!(remote.contains_key("ORCHERD_REMOTE_SOCKET"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tunnel_team_not_found_error_names_host_and_socket() {
+        use std::os::unix::net::UnixListener;
+
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("store.sqlite3");
+        let sock_path = tmp.path().join("control.sock");
+        let mut store = Store::open(&db_path).unwrap();
+
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let sock_clone = sock_path.clone();
+        let client = std::thread::spawn(move || {
+            let actor = Actor::Seat {
+                team_id: Some("team-70c1f6ea8670".to_owned()),
+                seat_name: "w1".to_owned(),
+                terminal: Some("t7".to_owned()),
+            };
+            send_remote_request(
+                &sock_clone,
+                &actor,
+                RequestEnvelope::new(Op::InboxRead {
+                    peek: true,
+                    seat: None,
+                    limit: None,
+                })
+                .with_team("team-70c1f6ea8670"),
+                None,
+            )
+        });
+
+        let (stream, _) = listener.accept().unwrap();
+        handle_client_stream_with_host(&mut store, stream, Some("m1"), Some("yeti-cachy".to_owned()));
+        let err = client.join().unwrap().unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "team not found on yeti-cachy (via the tunnel at {}): team-70c1f6ea8670; set ORCHERD_STATE_DIR or --team",
+                sock_path.display()
+            )
+        );
+
+        // Older daemon omitting `host` falls back to "remote host", and non-team errors stay verbatim.
+        assert_eq!(
+            format_remote_error("team not found: missing".to_owned(), None, &sock_path),
+            format!(
+                "team not found on remote host (via the tunnel at {}): missing; set ORCHERD_STATE_DIR or --team",
+                sock_path.display()
+            )
+        );
+        assert_eq!(
+            format_remote_error("seat not found in team demo: ghost".to_owned(), Some("yeti"), &sock_path),
+            "seat not found in team demo: ghost"
+        );
+    }
 }

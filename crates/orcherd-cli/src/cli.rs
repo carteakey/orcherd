@@ -8,7 +8,10 @@ use crate::{
         handle_verdict,
     },
     daemon, herdr_space,
-    identity::{resolve_actor, resolve_db_path, resolve_state_dir, resolve_team_ref},
+    identity::{
+        build_seat_env, default_state_dir, resolve_actor, resolve_db_path, resolve_state_dir,
+        resolve_team_ref,
+    },
     mod_install, model_check,
     output::{format_receipt, print_value, subcommand_help},
     preflight, remote, skills, tunnel,
@@ -734,20 +737,17 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
                         .ok()
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|| "orcherd".to_owned());
-                    let mut env_map = BTreeMap::new();
-                    env_map.insert("ORCHERD_CLI_COMMAND", exe.as_str());
-                    env_map.insert("ORCHERD_TEAM", team.team_id.as_str());
-                    env_map.insert("ORCHERD_SEAT", seat_name_cloned.as_str());
-                    if let Some(ref d_id) = dispatch_id {
-                        env_map.insert("ORCHERD_DISPATCH", d_id.as_str());
-                    }
-                    if let Some(ref m) = machine {
-                        env_map.insert("ORCHERD_MACHINE", m.as_str());
-                        env_map.insert(
-                            "ORCHERD_REMOTE_SOCKET",
-                            tunnel::default_remote_socket_expr(),
-                        );
-                    }
+                    let seat_env = build_seat_env(
+                        &exe,
+                        &team.team_id,
+                        &seat_name_cloned,
+                        dispatch_id.as_deref(),
+                        machine.as_deref(),
+                        &state_dir,
+                        &default_state_dir(),
+                    );
+                    let env_map: BTreeMap<&str, &str> =
+                        seat_env.iter().map(|(&k, v)| (k, v.as_str())).collect();
 
                     let mut labels = BTreeMap::new();
                     labels.insert("orcherd.team", team.team_id.as_str());
@@ -882,6 +882,9 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
 }
 
 pub fn run_op_raw(op: Op, global: &GlobalFlags) -> Result<Receipt, String> {
+    // Creating a team is always local to the machine where `orcherd init` runs; routing it
+    // through an inbound tunnel would create a phantom team in the remote host's store.
+    let allow_tunnel = !matches!(op, Op::Init { .. });
     let mut envelope = RequestEnvelope::new(op);
     if let Some(ref r) = global.request_id {
         envelope = envelope.with_request_id(r);
@@ -890,12 +893,16 @@ pub fn run_op_raw(op: Op, global: &GlobalFlags) -> Result<Receipt, String> {
     let state_dir = resolve_state_dir();
     let db_path = resolve_db_path(&state_dir);
 
-    let remote_sock = env::var("ORCHERD_REMOTE_SOCKET")
-        .ok()
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| remote::tunnel_socket_without_local_team(&state_dir, &db_path));
+    let remote_sock = if allow_tunnel {
+        env::var("ORCHERD_REMOTE_SOCKET")
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| remote::tunnel_socket_without_local_team(&state_dir, &db_path))
+    } else {
+        None
+    };
     if let Some(sock) = remote_sock {
         let team_ref = resolve_team_ref(global.team.as_deref(), None)?;
         if let Some(ref t) = team_ref {

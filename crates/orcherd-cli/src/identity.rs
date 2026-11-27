@@ -1,16 +1,15 @@
 //! State path and caller identity resolution (`SPEC.md` §6.1).
 
-use crate::worktree;
+use crate::{tunnel, worktree};
 use orcherd_core::{Actor, Address, Store};
 use std::{
+    collections::BTreeMap,
     env,
     path::{Path, PathBuf},
 };
 
-pub fn resolve_state_dir() -> PathBuf {
-    if let Some(dir) = env::var_os("ORCHERD_STATE_DIR").filter(|v| !v.is_empty()) {
-        return PathBuf::from(dir);
-    }
+/// Default store directory when `ORCHERD_STATE_DIR` is not overridden.
+pub fn default_state_dir() -> PathBuf {
     if let Some(xdg) = env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty()) {
         return PathBuf::from(xdg).join("orcherd");
     }
@@ -24,11 +23,57 @@ pub fn resolve_state_dir() -> PathBuf {
     PathBuf::from(".orcherd-state")
 }
 
+pub fn resolve_state_dir() -> PathBuf {
+    if let Some(dir) = env::var_os("ORCHERD_STATE_DIR").filter(|v| !v.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    default_state_dir()
+}
+
 pub fn resolve_db_path(state_dir: &Path) -> PathBuf {
     if let Some(path) = env::var_os("ORCHERD_DB_PATH").filter(|v| !v.is_empty()) {
         return PathBuf::from(path);
     }
     state_dir.join("store.sqlite3")
+}
+
+/// Builds the environment exported to a spawned seat terminal.
+///
+/// Local seats inherit a non-default `ORCHERD_STATE_DIR` (resolved to an absolute path so
+/// child worktrees hit the same store); remote seats keep the SSH tunnel socket route.
+pub(crate) fn build_seat_env(
+    exe: &str,
+    team_id: &str,
+    seat_name: &str,
+    dispatch_id: Option<&str>,
+    machine: Option<&str>,
+    state_dir: &Path,
+    default_dir: &Path,
+) -> BTreeMap<&'static str, String> {
+    let mut env_map = BTreeMap::new();
+    env_map.insert("ORCHERD_CLI_COMMAND", exe.to_owned());
+    env_map.insert("ORCHERD_TEAM", team_id.to_owned());
+    env_map.insert("ORCHERD_SEAT", seat_name.to_owned());
+    if let Some(d_id) = dispatch_id {
+        env_map.insert("ORCHERD_DISPATCH", d_id.to_owned());
+    }
+    if let Some(m) = machine {
+        env_map.insert("ORCHERD_MACHINE", m.to_owned());
+        env_map.insert(
+            "ORCHERD_REMOTE_SOCKET",
+            tunnel::default_remote_socket_expr().to_owned(),
+        );
+    } else if state_dir != default_dir {
+        let abs = if state_dir.is_relative() {
+            env::current_dir()
+                .map(|cwd| cwd.join(state_dir))
+                .unwrap_or_else(|_| state_dir.to_path_buf())
+        } else {
+            state_dir.to_path_buf()
+        };
+        env_map.insert("ORCHERD_STATE_DIR", abs.display().to_string());
+    }
+    env_map
 }
 
 pub fn resolve_team_arg(explicit: Option<&str>) -> Option<String> {
