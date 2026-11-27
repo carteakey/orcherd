@@ -872,6 +872,12 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
     {
         *r_seat = updated_seat;
     }
+    if let Some(warning) = prepared_wt.warning {
+        receipt.next = Some(match receipt.next.take() {
+            Some(existing) if !existing.trim().is_empty() => format!("{warning}. {existing}"),
+            _ => warning,
+        });
+    }
     outln!("{}", format_receipt(&receipt, global.json));
     Ok(if receipt.failed_stage.is_some() { 1 } else { 0 })
 }

@@ -5,7 +5,7 @@
 Choose `--worktree` based on file ownership and isolation needs:
 
 - **`--worktree current`**: Runs in the current checkout. Use for the supervisor, planner, read-only reviewers (`vicesuper`), documentation tasks, or non-overlapping edits that benefit from a shared build cache.
-- **`--worktree new-child`**: Creates a new git worktree branched from `HEAD` (or `--base-branch <ref>`) under `<workspace_root>-wt/<seat_or_task>` and binds it to the seat. Use whenever parallel workers edit overlapping crates/files or run concurrent builds.
+- **`--worktree new-child`**: Creates a new git worktree branched from `HEAD` (or `--base-branch <ref>`) under `<workspace_root>-wt/<seat_or_task>` and binds it to the seat. When the base branch tracks an upstream, `orcherd` fetches it (bounded, non-fatal) and starts from whichever is newer without moving the local ref; if they diverged, it uses local and warns in the receipt's `next`. Use whenever parallel workers edit overlapping crates/files or run concurrent builds.
 - **`--worktree new-top-level`**: Creates a sibling worktree outside the parent workspace hierarchy.
 - **`--worktree path:<dir>`**: Runs inside an existing worktree path (for example, pointing a blind `gauntlet` reviewer at `builder-a`'s child worktree so it can inspect built artifacts read-only).
 

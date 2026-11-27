@@ -9,6 +9,9 @@ use std::{
     collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
+    process::Stdio,
+    thread,
+    time::{Duration, Instant},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +84,8 @@ pub struct PreparedWorktree {
     pub created: bool,
     pub path: PathBuf,
     pub symlinked: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// Reads `.orcherd.toml` from `workspace_root` when present.
@@ -122,6 +127,7 @@ pub fn prepare(
             created: false,
             symlinked: Vec::new(),
             copied: Vec::new(),
+            warning: None,
         }),
         WorktreeSpec::Path(path) => {
             let resolved = if path.is_absolute() {
@@ -141,6 +147,7 @@ pub fn prepare(
                 created: false,
                 symlinked: Vec::new(),
                 copied: Vec::new(),
+                warning: None,
             })
         }
         WorktreeSpec::NewChild { name } | WorktreeSpec::NewTopLevel { name } => {
@@ -148,11 +155,12 @@ pub fn prepare(
             let is_child = matches!(spec, WorktreeSpec::NewChild { .. });
             let target_dir = worktree_target_dir(workspace_root, &slug, is_child)?;
             let branch = format!("orcherd/{slug}");
-            let created = if target_dir.join(".git").exists() {
-                false
+            let (created, warning) = if target_dir.join(".git").exists() {
+                (false, None)
             } else {
-                create_git_worktree(workspace_root, &target_dir, &branch, base_branch)?;
-                true
+                let warning =
+                    create_git_worktree(workspace_root, &target_dir, &branch, base_branch)?;
+                (true, warning)
             };
             let symlinked = apply_bootstrap_symlinks(workspace_root, &target_dir, symlinks)?;
             let copied = apply_bootstrap_copies(workspace_root, &target_dir, copies)?;
@@ -162,6 +170,7 @@ pub fn prepare(
                 created,
                 symlinked,
                 copied,
+                warning,
             })
         }
     }
@@ -182,22 +191,150 @@ fn worktree_target_dir(workspace_root: &Path, slug: &str, is_child: bool) -> Res
     }
 }
 
+const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+
+struct ResolvedBase {
+    start_point: Option<String>,
+    warning: Option<String>,
+}
+
+/// Resolves the starting commit for a fresh worktree without touching local branch refs.
+///
+/// When `base_branch` (or `HEAD` if omitted) tracks an upstream, fetches that upstream
+/// with a short wall-clock bound (ignoring fetch failures) and prefers whichever is newer.
+/// If local and upstream have diverged, keeps local and returns a warning for the receipt.
+fn resolve_base_ref(workspace_root: &Path, base_branch: Option<&str>) -> ResolvedBase {
+    let explicit = base_branch.map(str::trim).filter(|s| !s.is_empty());
+    let local_ref = explicit.unwrap_or("HEAD");
+    let fallback = || ResolvedBase {
+        start_point: explicit.map(str::to_owned),
+        warning: None,
+    };
+
+    let upstream_spec = format!("{local_ref}@{{upstream}}");
+    let Some(upstream_full) = git_stdout(
+        workspace_root,
+        &["rev-parse", "--symbolic-full-name", &upstream_spec],
+    ) else {
+        return fallback();
+    };
+    let upstream_short = git_stdout(
+        workspace_root,
+        &["rev-parse", "--abbrev-ref", &upstream_spec],
+    )
+    .unwrap_or_else(|| upstream_full.clone());
+
+    if let Some(local_branch) =
+        git_stdout(workspace_root, &["rev-parse", "--abbrev-ref", local_ref])
+            .filter(|b| b != "HEAD")
+        && let Some(remote) = git_stdout(
+            workspace_root,
+            &["config", "--get", &format!("branch.{local_branch}.remote")],
+        )
+        && remote != "."
+        && let Some(merge) = git_stdout(
+            workspace_root,
+            &["config", "--get", &format!("branch.{local_branch}.merge")],
+        )
+    {
+        let remote_branch = merge.strip_prefix("refs/heads/").unwrap_or(&merge);
+        fetch_upstream(workspace_root, &remote, remote_branch);
+    }
+
+    let range = format!("{local_ref}...{upstream_full}");
+    let Some(counts) = git_stdout(
+        workspace_root,
+        &["rev-list", "--left-right", "--count", &range],
+    ) else {
+        return fallback();
+    };
+    let mut parts = counts.split_whitespace();
+    let (Some(ahead), Some(behind)) = (
+        parts.next().and_then(|s| s.parse::<u64>().ok()),
+        parts.next().and_then(|s| s.parse::<u64>().ok()),
+    ) else {
+        return fallback();
+    };
+
+    if ahead == 0 && behind > 0 {
+        let commit_spec = format!("{upstream_full}^{{commit}}");
+        if let Some(oid) = git_stdout(workspace_root, &["rev-parse", "--verify", &commit_spec]) {
+            return ResolvedBase {
+                start_point: Some(oid),
+                warning: None,
+            };
+        }
+    } else if ahead > 0 && behind > 0 {
+        let local_label = git_stdout(workspace_root, &["rev-parse", "--abbrev-ref", local_ref])
+            .unwrap_or_else(|| local_ref.to_owned());
+        return ResolvedBase {
+            start_point: explicit.map(str::to_owned),
+            warning: Some(format!(
+                "warning: local `{local_label}` and `{upstream_short}` have diverged ({ahead} ahead, {behind} behind); based worktree on local `{local_label}`"
+            )),
+        };
+    }
+
+    fallback()
+}
+
+fn git_stdout(workspace_root: &Path, args: &[&str]) -> Option<String> {
+    let output = new_command("git")
+        .current_dir(workspace_root)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+/// Best-effort bounded fetch of the tracked remote branch; failures and timeouts are non-fatal.
+fn fetch_upstream(workspace_root: &Path, remote: &str, remote_branch: &str) {
+    let mut cmd = new_command("git");
+    cmd.current_dir(workspace_root)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(["fetch", "--quiet", "--no-tags", remote, remote_branch])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let Ok(mut child) = cmd.spawn() else {
+        return;
+    };
+    let deadline = Instant::now() + FETCH_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(25)),
+        }
+    }
+}
+
 fn create_git_worktree(
     workspace_root: &Path,
     target_dir: &Path,
     branch: &str,
     base_branch: Option<&str>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     if let Some(parent) = target_dir.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create worktree parent `{}`: {e}", parent.display()))?;
     }
+    let resolved = resolve_base_ref(workspace_root, base_branch);
     let mut cmd = new_command("git");
     cmd.current_dir(workspace_root)
         .args(["worktree", "add", "-B", branch])
         .arg(target_dir);
-    if let Some(base) = base_branch.filter(|b| !b.trim().is_empty()) {
-        cmd.arg(base);
+    if let Some(ref start) = resolved.start_point {
+        cmd.arg(start);
     }
     let output = cmd
         .output()
@@ -210,7 +347,7 @@ fn create_git_worktree(
             stderr.trim()
         ));
     }
-    Ok(())
+    Ok(resolved.warning)
 }
 
 pub fn apply_bootstrap_symlinks(
