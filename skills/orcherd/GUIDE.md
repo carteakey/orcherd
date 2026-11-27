@@ -57,6 +57,7 @@ Run `ORCHERD inbox` to read and mark-read your pending items:
 - **`escalation` "Seat isn't taking its doorbell"**: the seat had unread items and refused its doorbell for over a minute. Check it with `ORCHERD seat read <seat> --lines 40` (often a dialog, a crashed harness, or a stuck status).
 - **`escalation` (`stop_reason: blocked | exited | lost | stalled`)**:
   - `blocked`: `herdr-core` reported `StatusState::Blocked` (an auth or permission dialog in the worker's terminal). If it is an OAuth sign-in screen, ask the user to sign in once in that terminal; do not spawn duplicate workers that will hit the same screen.
+  - `stalled`: the seat had unread items and reported `working` with an unchanged screen for over 5 min. Inspect it with `ORCHERD seat read <seat> --lines 40` (often a failed turn whose status hook stayed `working`); Orcherd never types into it.
   - `exited` or `lost`: Load `references/recovery-and-cleanup.md` before retrying or stopping.
 
 ## Task spec & completion report contract

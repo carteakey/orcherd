@@ -306,3 +306,77 @@ fn blocked_seat_produces_one_escalation_and_preserves_strike_counting() {
     assert_eq!(after_exit.failure_count, 1);
     assert_eq!(after_exit.state, DispatchState::SettledFailed);
 }
+
+#[test]
+fn stalled_escalation_deduplicates_sets_stop_reason_and_skips_supervisor() {
+    let (_dir, mut store, team_id) = team();
+
+    let ReceiptData::SpawnPrepared { dispatch: Some(disp), .. } = store
+        .apply(
+            &seat("super"),
+            RequestEnvelope::new(Op::SpawnPrepare {
+                seat: "zcode1".to_string(),
+                role: None,
+                agent: Some("zcode".to_string()),
+                model: None,
+                account: None,
+                effort: None,
+                worktree_path: None,
+                branch: None,
+                machine: None,
+                task_id: None,
+                spec: Some("Stall check".to_string()),
+                title: Some("Stall check".to_string()),
+                keep_open: None,
+                resume_session: None,
+                retry_of: None,
+            }),
+        )
+        .unwrap()
+        .data
+    else {
+        panic!("expected SpawnPrepared with dispatch");
+    };
+
+    for _ in 0..2 {
+        let ReceiptData::Dispatch(after) = store
+            .apply(
+                &human(),
+                RequestEnvelope::new(Op::DaemonEscalate {
+                    seat: "zcode1".to_string(),
+                    dispatch_id: Some(disp.dispatch_id.clone()),
+                    stop_reason: "stalled".to_string(),
+                    detail: "unchanged screen for 5 min".to_string(),
+                }),
+            )
+            .unwrap()
+            .data
+        else {
+            panic!("expected Dispatch");
+        };
+        assert_eq!(after.stop_reason.as_deref(), Some("stalled"));
+        assert_eq!(after.failure_count, 0);
+        assert_eq!(after.state, DispatchState::Starting);
+    }
+
+    // Supervisor stalling never writes into its own inbox.
+    store
+        .apply(
+            &human(),
+            RequestEnvelope::new(Op::DaemonEscalate {
+                seat: "super".to_string(),
+                dispatch_id: None,
+                stop_reason: "stalled".to_string(),
+                detail: "supervisor screen unchanged".to_string(),
+            }),
+        )
+        .unwrap();
+
+    let escalations: Vec<_> = unread(&store, &team_id, "super")
+        .into_iter()
+        .filter(|i| i.kind == InboxKind::Escalation)
+        .collect();
+    assert_eq!(escalations.len(), 1, "expected one deduplicated stall escalation: {escalations:?}");
+    assert_eq!(escalations[0].ref_id, disp.dispatch_id);
+    assert!(escalations[0].subject.contains("stalled"));
+}

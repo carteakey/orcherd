@@ -379,6 +379,7 @@ The daemon connects to `herdr-core` (`orcherd_hc::Core`) and subscribes to `even
      - `started: None` (harness does not report OSC 7501) -> stamp `inbox.delivered_at`, set `doorbell.outcome = 'unconfirmed'`.
      - `started: Some(false)` or refused `status_mismatch` / unreachable -> nothing is written; the daemon retries on later ticks and, after 60 s of refusals, records the outcome once, which sends the Supervisor one `escalation` ("isn't taking its doorbell").
      - Refused `blocked` -> once per stall: set `doorbell.outcome = 'blocked'`, wake Supervisor with `escalation`.
+   - **Frozen `working` screen detection (#8)**: If a non-supervisor seat has unread inbox items and keeps reporting `working` while its observe-only screen preview (`read_preview`, sampled every 30 s) stays unchanged for 5 min (`STALL_AFTER`), the daemon escalates once via `DaemonEscalate` (`stop_reason = 'stalled'`, `doorbell.outcome = 'stalled'`, without typing into the seat or spending a crash strike). A screen change resets the clock, and leaving `working` or clearing unread items clears tracking.
 
 ---
 

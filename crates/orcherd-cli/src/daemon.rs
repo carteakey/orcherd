@@ -131,6 +131,8 @@ pub struct RingBackoff {
     ready_terminals: BTreeSet<String>,
     /// Startup `blocked` notices waiting out `STARTUP_GRACE`, keyed by terminal address.
     pending_blocks: BTreeMap<String, (Instant, String)>,
+    /// Tracks `working` seats with frozen screens while unread inbox items wait (#8).
+    stall: crate::stall::StallWatch,
 }
 
 impl RingBackoff {
@@ -147,6 +149,7 @@ impl RingBackoff {
     fn clear(&mut self, key: &(String, String)) {
         self.refused_since.remove(key);
         self.escalated.remove(key);
+        self.stall.clear(key);
     }
 
     fn mark_ready(&mut self, terminal: &str) {
@@ -328,9 +331,25 @@ pub fn tick_once(
                 backoff.mark_ready(&target_address);
             }
             let only_if = match ring_condition(state) {
-                Ring::Wait => continue,
-                Ring::IfIdle => Some("idle"),
-                Ring::Now => None,
+                Ring::Wait => {
+                    backoff.stall.check_working(
+                        store,
+                        seat,
+                        active_dispatch_for_seat(&proj, &seat.seat_id),
+                        undelivered.len(),
+                        Instant::now(),
+                        || crate::stall::hash_screen(core, &target_address),
+                    );
+                    continue;
+                }
+                Ring::IfIdle => {
+                    backoff.stall.clear(&key);
+                    Some("idle")
+                }
+                Ring::Now => {
+                    backoff.stall.clear(&key);
+                    None
+                }
             };
             let send_res = core.send(&SendText {
                 force: false,

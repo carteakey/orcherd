@@ -887,17 +887,22 @@ fn exec_daemon_escalate(conn: &Connection, team_id: &str, now: &str, seat_ref: &
         .optional()?
     };
 
-    if stop_reason == "blocked" {
+    if matches!(stop_reason, "blocked" | "stalled") {
         conn.execute(
-            "INSERT INTO doorbell (team_id, seat_id, rung_through_seq, rung_at, attempts, outcome) VALUES (?1, ?2, 0, ?3, 1, 'blocked') ON CONFLICT(team_id, seat_id) DO UPDATE SET rung_at = excluded.rung_at, outcome = 'blocked'",
-            params![team_id, seat.seat_id, now],
+            "INSERT INTO doorbell (team_id, seat_id, rung_through_seq, rung_at, attempts, outcome) VALUES (?1, ?2, 0, ?3, 1, ?4) ON CONFLICT(team_id, seat_id) DO UPDATE SET rung_at = excluded.rung_at, outcome = excluded.outcome",
+            params![team_id, seat.seat_id, now, stop_reason],
         )?;
         if seat.role != SeatRole::Supervisor && seat.name != supervisor {
             let ref_id = target_dispatch.as_ref().map_or(seat.seat_id.as_str(), |d| d.dispatch_id.as_str());
-            write_dedup_escalation_inbox(conn, team_id, &supervisor, &seat.name, ref_id, &format!("Seat '{}' is blocked ({stop_reason})", seat.name), detail, now)?;
+            let subject = if stop_reason == "stalled" {
+                format!("Seat '{}' appears stalled", seat.name)
+            } else {
+                format!("Seat '{}' is blocked ({stop_reason})", seat.name)
+            };
+            write_dedup_escalation_inbox(conn, team_id, &supervisor, &seat.name, ref_id, &subject, detail, now)?;
         }
         if let Some(disp) = target_dispatch {
-            conn.execute("UPDATE dispatches SET stop_reason = 'blocked', updated_at = ?1 WHERE dispatch_id = ?2", params![now, disp.dispatch_id])?;
+            conn.execute("UPDATE dispatches SET stop_reason = ?1, updated_at = ?2 WHERE dispatch_id = ?3", params![stop_reason, now, disp.dispatch_id])?;
             let updated = resolve_dispatch(conn, team_id, &disp.dispatch_id)?;
             return Ok(OpOutcome::simple(team_id, Some(updated.dispatch_id.clone()), ReceiptData::Dispatch(Box::new(updated))));
         }
