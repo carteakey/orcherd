@@ -8,7 +8,7 @@ use crate::{
         handle_verdict,
     },
     daemon, herdr_space,
-    identity::{resolve_actor, resolve_db_path, resolve_state_dir, resolve_team_arg},
+    identity::{resolve_actor, resolve_db_path, resolve_state_dir, resolve_team_ref},
     mod_install,
     output::{format_receipt, print_value, subcommand_help},
     remote, skills, tunnel,
@@ -636,7 +636,7 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
     let db_path = resolve_db_path(&state_dir);
     let mut store =
         Store::open(&db_path).map_err(|e| format!("failed to open `{}`: {e}", db_path.display()))?;
-    let team_ref = resolve_team_arg(global.team.as_deref());
+    let team_ref = resolve_team_ref(global.team.as_deref(), Some(&store))?;
     let team = store
         .resolve_team(team_ref.as_deref())
         .map_err(|e| e.to_string())?;
@@ -877,11 +877,7 @@ fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32, String> {
 }
 
 pub fn run_op_raw(op: Op, global: &GlobalFlags) -> Result<Receipt, String> {
-    let team_ref = resolve_team_arg(global.team.as_deref());
     let mut envelope = RequestEnvelope::new(op);
-    if let Some(ref t) = team_ref {
-        envelope = envelope.with_team(t);
-    }
     if let Some(ref r) = global.request_id {
         envelope = envelope.with_request_id(r);
     }
@@ -896,6 +892,10 @@ pub fn run_op_raw(op: Op, global: &GlobalFlags) -> Result<Receipt, String> {
         .map(PathBuf::from)
         .or_else(|| remote::tunnel_socket_without_local_team(&state_dir, &db_path));
     if let Some(sock) = remote_sock {
+        let team_ref = resolve_team_ref(global.team.as_deref(), None)?;
+        if let Some(ref t) = team_ref {
+            envelope = envelope.with_team(t);
+        }
         let actor = resolve_actor(None, team_ref.as_deref(), global.act_as.as_deref());
         let machine = env::var("ORCHERD_MACHINE").ok();
         return remote::send_remote_request(&sock, &actor, envelope, machine);
@@ -903,16 +903,10 @@ pub fn run_op_raw(op: Op, global: &GlobalFlags) -> Result<Receipt, String> {
 
     let mut store =
         Store::open(&db_path).map_err(|e| format!("failed to open `{}`: {e}", db_path.display()))?;
-    // No --team / $ORCHERD_TEAM and no seat identity: use the team rooted at this repo,
-    // so `status` in one repo doesn't report whichever team was created last.
-    let team_ref = match team_ref {
-        Some(t) => Some(t),
-        None if global.act_as.is_none() && env::var_os("ORCHERD_SEAT").is_none() => env::current_dir()
-            .ok()
-            .and_then(|cwd| store.team_for_path(&cwd).ok().flatten())
-            .inspect(|t| envelope.team = Some(t.clone())),
-        None => None,
-    };
+    let team_ref = resolve_team_ref(global.team.as_deref(), Some(&store))?;
+    if let Some(ref t) = team_ref {
+        envelope = envelope.with_team(t);
+    }
     let actor = resolve_actor(Some(&store), team_ref.as_deref(), global.act_as.as_deref());
     store.apply(&actor, envelope).map_err(|e| e.to_string())
 }

@@ -1,5 +1,6 @@
 //! State path and caller identity resolution (`SPEC.md` §6.1).
 
+use crate::worktree;
 use orcherd_core::{Actor, Address, Store};
 use std::{
     env,
@@ -38,6 +39,67 @@ pub fn resolve_team_arg(explicit: Option<&str>) -> Option<String> {
         .ok()
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
+}
+
+/// Resolves the target team reference for every CLI command in fixed precedence order:
+/// 1. `--team`
+/// 2. `$ORCHERD_TEAM`
+/// 3. `[team] name` in `.orcherd.toml`, walking up from `cwd` to the git root
+/// 4. Deepest `workspace_root` in `store` containing `cwd` (newest team on a tie)
+///
+/// Returns `None` so `Store::resolve_team(None)` falls back to the newest team in the store.
+pub fn resolve_team_ref(explicit: Option<&str>, store: Option<&Store>) -> Result<Option<String>, String> {
+    let env_team = env::var("ORCHERD_TEAM").ok();
+    let cwd = env::current_dir().ok();
+    resolve_team_ref_in(explicit, env_team.as_deref(), cwd.as_deref(), store)
+}
+
+pub(crate) fn resolve_team_ref_in(
+    explicit: Option<&str>,
+    env_team: Option<&str>,
+    cwd: Option<&Path>,
+    store: Option<&Store>,
+) -> Result<Option<String>, String> {
+    if let Some(t) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
+        return Ok(Some(t.to_owned()));
+    }
+    if let Some(t) = env_team.map(str::trim).filter(|s| !s.is_empty()) {
+        return Ok(Some(t.to_owned()));
+    }
+    if let Some(dir) = cwd {
+        if let Some(name) = team_name_from_project_config(dir)? {
+            return Ok(Some(name));
+        }
+        if let Some(store) = store
+            && let Ok(Some(team_id)) = store.team_for_path(dir)
+        {
+            return Ok(Some(team_id));
+        }
+    }
+    Ok(None)
+}
+
+/// Walks up from `cwd` to the enclosing git root (inclusive) looking for `.orcherd.toml`'s `[team] name`.
+fn team_name_from_project_config(cwd: &Path) -> Result<Option<String>, String> {
+    for dir in cwd.ancestors() {
+        if dir.join(".orcherd.toml").is_file() {
+            let cfg = worktree::load_project_config(dir)?;
+            if let Some(name) = cfg
+                .team
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return Ok(Some(name.to_owned()));
+            }
+        }
+        // Stop at the repo or worktree root so a parent directory's config cannot leak in.
+        if dir.join(".git").exists() {
+            break;
+        }
+    }
+    Ok(None)
 }
 
 pub fn current_terminal_env() -> Option<String> {

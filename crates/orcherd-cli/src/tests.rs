@@ -453,3 +453,79 @@ fn doorbells_ring_seats_that_end_turns_as_done() {
     assert_eq!(ring_condition(Some(StatusState::Error)), Ring::Now);
     assert_eq!(ring_condition(None), Ring::Now);
 }
+
+#[test]
+fn team_resolution_precedence_and_project_config_git_boundary() {
+    use crate::identity::resolve_team_ref_in;
+
+    let tmp = TempDir::new().unwrap();
+    let parent = tmp.path();
+    let repo = parent.join("repo");
+    let deep = repo.join("sub").join("deep");
+    let other_repo = parent.join("other-repo");
+    let other_src = other_repo.join("src");
+    let unrelated = parent.join("unrelated");
+
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::create_dir_all(&deep).unwrap();
+    fs::create_dir_all(&other_src).unwrap();
+    fs::create_dir_all(&unrelated).unwrap();
+    // Simulate a git worktree `.git` file in `other_repo` with no `.orcherd.toml`.
+    fs::write(other_repo.join(".git"), "gitdir: /nowhere\n").unwrap();
+    // Parent config must not leak across `other_repo`'s git boundary.
+    fs::write(parent.join(".orcherd.toml"), "[team]\nname = \"parent-team\"\n").unwrap();
+    fs::write(repo.join(".orcherd.toml"), "[team]\nname = \"toml-team\"\n").unwrap();
+
+    let mut store = Store::open_in_memory().unwrap();
+    let human = Actor::Human { terminal: None };
+    let init_team = |store: &mut Store, name: &str, root: &std::path::Path| -> String {
+        store
+            .apply(
+                &human,
+                RequestEnvelope::new(Op::Init {
+                    name: name.to_owned(),
+                    template: Some(TemplateKind::Small),
+                    goal: None,
+                    workspace_root: root.display().to_string(),
+                    bootstrap_symlinks: Vec::new(),
+                    bootstrap_copies: Vec::new(),
+                }),
+            )
+            .unwrap()
+            .team_id
+    };
+
+    let _toml_id = init_team(&mut store, "toml-team", &repo);
+    let _newer_same_root_id = init_team(&mut store, "newer-same-root", &repo);
+    let other_id = init_team(&mut store, "other-team", &other_repo);
+    let _newest_elsewhere = init_team(&mut store, "newest-elsewhere", std::path::Path::new("/elsewhere"));
+
+    // 1. `--team` beats `ORCHERD_TEAM`, `.orcherd.toml`, and `workspace_root`.
+    assert_eq!(
+        resolve_team_ref_in(Some("flag-team"), Some("env-team"), Some(&deep), Some(&store)).unwrap(),
+        Some("flag-team".to_owned())
+    );
+    // 2. `ORCHERD_TEAM` beats `.orcherd.toml` and `workspace_root`.
+    assert_eq!(
+        resolve_team_ref_in(None, Some("env-team"), Some(&deep), Some(&store)).unwrap(),
+        Some("env-team".to_owned())
+    );
+    // 3. `.orcherd.toml` (walked up from `deep` to git root) beats `workspace_root` even when
+    //    another newer team is registered at the same `workspace_root`.
+    assert_eq!(
+        resolve_team_ref_in(None, None, Some(&deep), Some(&store)).unwrap(),
+        Some("toml-team".to_owned())
+    );
+    // 4. Walking up stops at `.git`, so `other_repo` ignores `parent/.orcherd.toml` and resolves
+    //    via `workspace_root`.
+    assert_eq!(
+        resolve_team_ref_in(None, None, Some(&other_src), Some(&store)).unwrap(),
+        Some(other_id)
+    );
+    // 5. Outside any matching repo, returns `None` so `Store::resolve_team(None)` picks the newest team.
+    let outside = TempDir::new().unwrap();
+    assert_eq!(
+        resolve_team_ref_in(None, None, Some(outside.path()), Some(&store)).unwrap(),
+        None
+    );
+}

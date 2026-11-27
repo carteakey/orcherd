@@ -163,7 +163,10 @@ Seats you spawn from a Herdr terminal open as their own tabs in that space (`--n
 ## Commands
 
 Every command takes `--json`, `--team`, `--as <seat>`, and `--request-id` (safe retries), plus
-`orcherd <command> --help`. Long text always comes from a file: `--spec-file`, `--body-file`, `--result-file`.
+`orcherd <command> --help`. Without `--team`, every command resolves `$ORCHERD_TEAM`, then
+`.orcherd.toml` `[team] name` up to the git root, then the deepest matching `workspace_root`
+(newest on a tie), then the newest team in the store. Long text always comes from a file:
+`--spec-file`, `--body-file`, `--result-file`.
 
 | | |
 | --- | --- |

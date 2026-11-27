@@ -80,7 +80,8 @@ pub fn apply(store: &mut Store, actor: &Actor, envelope: RequestEnvelope) -> Res
                     params![now, team.team_id, clean],
                 )?;
             }
-            exec_team_op(&tx, &team.team_id, actor, &now, other_op)?
+            exec_team_op(&tx, &team.team_id, actor, &now, other_op)
+                .map_err(|err| err.with_team(&team.name))?
         }
     };
 

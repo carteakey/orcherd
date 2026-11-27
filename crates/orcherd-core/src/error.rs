@@ -22,8 +22,12 @@ pub enum Error {
     #[error("database schema version {found} is newer than supported version {supported}")]
     SchemaTooNew { found: u32, supported: u32 },
 
-    #[error("{entity} not found: {id}")]
-    NotFound { entity: &'static str, id: String },
+    #[error("{}", format_not_found(entity, team.as_deref(), id))]
+    NotFound {
+        entity: &'static str,
+        id: String,
+        team: Option<String>,
+    },
 
     #[error("ambiguous {entity} prefix '{prefix}': matches {candidates:?}")]
     AmbiguousPrefix {
@@ -64,11 +68,35 @@ impl Error {
         Self::NotFound {
             entity,
             id: id.into(),
+            team: None,
+        }
+    }
+
+    /// Attach the searched team name to a team-scoped `NotFound` error.
+    pub fn with_team(self, team_name: &str) -> Self {
+        match self {
+            Self::NotFound {
+                entity,
+                id,
+                team: None,
+            } if entity != "team" => Self::NotFound {
+                entity,
+                id,
+                team: Some(team_name.to_owned()),
+            },
+            other => other,
         }
     }
 
     /// Construct a `Validation` error.
     pub fn validation(msg: impl Into<String>) -> Self {
         Self::Validation(msg.into())
+    }
+}
+
+fn format_not_found(entity: &str, team: Option<&str>, id: &str) -> String {
+    match team {
+        Some(t) => format!("{entity} not found in team {t}: {id}"),
+        None => format!("{entity} not found: {id}"),
     }
 }

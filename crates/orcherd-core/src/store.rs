@@ -70,15 +70,24 @@ impl Store {
     /// The newest team whose `workspace_root` is `path` or one of its ancestors,
     /// preferring the deepest root. Lets `--team` default to the current repo's team.
     pub fn team_for_path(&self, path: &Path) -> Result<Option<String>> {
-        let mut stmt = self.conn.prepare("SELECT team_id, workspace_root FROM teams ORDER BY rowid DESC")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT rowid, team_id, workspace_root FROM teams ORDER BY rowid ASC")?;
         let rows = stmt
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        // Tie-break on rowid so the newest team wins when two teams share a workspace root.
         Ok(rows
             .into_iter()
-            .filter(|(_, root)| !root.is_empty() && path.starts_with(root))
-            .max_by_key(|(_, root)| root.len())
-            .map(|(id, _)| id))
+            .filter(|(_, _, root)| !root.is_empty() && path.starts_with(root))
+            .max_by_key(|(rowid, _, root)| (Path::new(root).components().count(), *rowid))
+            .map(|(_, id, _)| id))
     }
 
     /// Build the live `TeamProjection` for `team_id`.

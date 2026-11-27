@@ -19,6 +19,7 @@ ORCHERD init --name <team> --template <review-crew|studio-crew|small> --goal "<o
 ORCHERD spawn --seat <seat_name> --agent <agent> --worktree <current|new-child> --spec-file <brief.md> --json
 ```
 
+- **Team resolution**: Spawned seats have `ORCHERD_TEAM` set; otherwise every command resolves `--team`, `$ORCHERD_TEAM`, `.orcherd.toml` `[team] name` up to the git root, the repo's `workspace_root` (newest on a tie), and finally the newest team in the store.
 - **Persistent Seats vs. One-Off Workers**: `--seat <name>` binds work to a named roster seat (`zcode1`, `neon1`, `vicesuper`, `gauntlet`). If that seat already has a warm live terminal on `herdr-core`, `spawn` (or `task assign --to <seat>`) reuses the running signed-in agent process and rings its doorbell when idle—preserving OAuth sessions and context.
 - **Seats show in the Herdr app**: a seat spawned on this machine inherits your terminal's Herdr space (else the supervisor's) and opens there as its own tab. Pass `--no-ui` for a headless seat; seats placed `--on` another machine stay headless.
 - **Worktrees**: Use `--worktree current` for read-only reviews (`vicesuper`, `gauntlet`), docs, or non-overlapping edits. Use `--worktree new-child` when parallel builders touch the same repository; Orcherd automatically creates the child worktree and symlinks `bootstrap_symlinks` (`.env`, `.venv`, `node_modules`) from the workspace root.

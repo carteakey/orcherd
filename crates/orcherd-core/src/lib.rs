@@ -11,6 +11,8 @@ pub mod types;
 mod tests;
 #[cfg(test)]
 mod tests_supervise;
+#[cfg(test)]
+mod tests_team;
 
 pub use apply::apply;
 pub use error::{Error, Result};
