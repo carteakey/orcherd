@@ -9,11 +9,13 @@
 // Herdr's own Agents list stays as shipped.
 
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
+import { v_flex, h_flex, TextView } from "gpui-base";
 import { exec, spaces, focused, terminals, theme, run, checking, nextCommand, notify, window, home } from "herdr";
 
 const POLL_MS = 5000;
-const BULLETIN_SHOWN = 6;
+const BULLETIN_SHOWN = 40; // newest first; the latest BULLETIN_OPEN show their full text
+const BULLETIN_OPEN = 3;
+const COLUMN_MIN = 380; // two columns when the board is at least twice this wide
 const CONFIRM_MS = 4000; // the Freeze button arms on the first click and fires on the second
 const ICON = "mods/orcherd/icon.svg";
 const TEAM_SPACE_PREFIX = "orcherd-"; // `orcherd spawn` opens each team's seats in space `orcherd-<team id>`
@@ -48,6 +50,8 @@ export default class Orcherd extends View {
     this.showDone = false;
     this.seenGates = null; // gate ids already announced; null until the first load
     this.posts = [];
+    this.openPosts = new Set(); // post ids expanded by a click
+    this.seenPosts = null; // post ids present when the board opened; later ones are "new"
     this.armedAt = 0; // when the Freeze/Unfreeze button was armed
     this.acting = false;
     this.teamNames = new Map(); // team id -> name, looked up once per team
@@ -132,7 +136,10 @@ export default class Orcherd extends View {
           this.announce(this.proj);
           // Bulletin: a read-only op, so polling it writes no audit rows.
           const b = this.proj && await exec("orcherd", ["--team", this.proj.team.team_id, "bulletin", "list", "--json"], { cwd, timeout: 10000 });
-          if (b?.code === 0) this.posts = (JSON.parse(b.stdout)?.data?.value ?? []).slice(-BULLETIN_SHOWN).reverse();
+          if (b?.code === 0) {
+            this.posts = (JSON.parse(b.stdout)?.data?.value ?? []).slice(-BULLETIN_SHOWN).reverse();
+            this.seenPosts ??= new Set(this.posts.map((post) => post.post_id));
+          }
         } else {
           const msg = (r.stderr || r.stdout).trim();
           // No team yet is a normal state, not an error.
@@ -181,16 +188,37 @@ export default class Orcherd extends View {
     });
   }
 
-  postRow(t, post) {
+  // A post's markdown, led by its subject unless the subject is just the body's opening.
+  postText(post) {
+    const plain = (x) => x.replace(/[*_`#>]/g, "").trim();
+    const subject = plain(post.subject ?? "");
+    if (!subject || plain(post.body).startsWith(subject.replace(/…$/, ""))) return post.body;
+    return `**${post.subject}**\n\n${post.body}`;
+  }
+
+  postRow(t, post, index) {
     const tone = post.kind === "authorized" ? t.done : post.kind === "handoff" ? t.working : t.muted;
-    return v_flex().px(8).py(4).gap(1)
+    const isNew = this.seenPosts && !this.seenPosts.has(post.post_id);
+    const open = index < BULLETIN_OPEN || this.openPosts.has(post.post_id);
+    const title = post.subject || post.body.split("\n")[0];
+    return v_flex().id(`post-${post.post_id}`).px(8).py(6).gap(3).rounded(6)
+      .hover((s) => s.bg(t.hover))
+      .on_click((_e, cx) => {
+        if (index < BULLETIN_OPEN) return;
+        this.openPosts.has(post.post_id) ? this.openPosts.delete(post.post_id) : this.openPosts.add(post.post_id);
+        cx.notify();
+      })
       .child(h_flex().gap(6).items_center().text_size(11)
         .child(div().text_color(t.foreground).font_semibold().child(post.author_seat))
         .when(post.kind !== "post", (el) => el.child(this.pill(t, post.kind, tone)))
+        .when(isNew, (el) => el.child(this.pill(t, "new", t.accent)))
         .child(div().flex_1())
         .child(div().text_color(t.dim).child(since(post.created_at))))
-      .child(div().text_color(t.muted).truncate().child(post.subject || post.body.split("\n")[0]));
+      .child(open
+        ? TextView.markdown(`post-body-${post.post_id}`, this.postText(post)).raw_html(false).selectable(true)
+        : div().text_color(t.muted).truncate().child(title));
   }
+
 
   // A toast when a seat asks the human-facing supervisor something, once per gate.
   announce(proj) {
@@ -356,7 +384,7 @@ export default class Orcherd extends View {
     const done = (byStatus.completed ?? []).length + (byStatus.cancelled ?? []).length;
     const open = p.tasks.length - done;
 
-    let body = v_flex().gap(14);
+    let body = v_flex().gap(14).flex_1().min_w(COLUMN_MIN);
     if (p.team.paused_at) {
       body = body.child(v_flex().px(10).py(8).gap(3).rounded(6).border(1).border_color(t.blocked)
         .child(div().text_color(t.blocked).font_semibold().child(`Frozen ${since(p.team.paused_at)} ago`))
@@ -369,9 +397,6 @@ export default class Orcherd extends View {
     }
     body = body.child(this.section(t, "Seats", `${live.length}/${p.seats.length} live`,
       v_flex().gap(1).children(seatRows.map(({ s, term }) => this.seatRow(t, s, term, p.unread_counts?.[s.name] ?? 0, activeTask.get(s.name))))));
-    if (this.posts.length > 0) {
-      body = body.child(this.section(t, "Bulletin", null, v_flex().gap(1).children(this.posts.map((post) => this.postRow(t, post)))));
-    }
     const taskGroups = TASK_ORDER.filter((k) => byStatus[k]?.length).map((k) =>
       v_flex().gap(1)
         .child(div().px(8).text_size(11).text_color(k === "blocked" || k === "failed" ? t.blocked : k === "review" ? t.done : t.muted).child(`${TASK_LABEL[k]} · ${byStatus[k].length}`))
@@ -386,6 +411,12 @@ export default class Orcherd extends View {
         .when(this.showDone, (el) => el.children((byStatus.completed ?? []).map((task) => this.taskRow(t, task, seatName))))));
     const others = this.teamsSection(t, all, p.team.team_id);
     if (others) body = body.child(others);
+    const fresh = this.seenPosts ? this.posts.filter((post) => !this.seenPosts.has(post.post_id)).length : 0;
+    const bulletin = v_flex().gap(4).flex_1().min_w(COLUMN_MIN)
+      .child(this.section(t, "Bulletin", fresh ? `${fresh} new` : `live · ${this.posts.length}`,
+        this.posts.length
+          ? v_flex().gap(2).children(this.posts.map((post, i) => this.postRow(t, post, i)))
+          : div().px(8).text_color(t.dim).child("No posts yet.")));
 
     return v_flex().size_full().bg(t.surface).text_size(12.5)
       .child(v_flex().px(12).pt(12).pb(10).gap(6).border_b(1).border_color(t.border)
@@ -407,6 +438,7 @@ export default class Orcherd extends View {
           .child(this.pill(t, `${blocked} blocked`, blocked ? t.blocked : t.dim))
           .child(this.pill(t, `${p.pending_gates.length} gates`, p.pending_gates.length ? t.working : t.dim))
           .when(Boolean(p.team.paused_at), (el) => el.child(this.pill(t, "frozen", t.blocked)))))
-      .child(div().id("board").flex_1().overflow_y_scrollbar().p(8).child(body));
+      .child(div().id("board").flex_1().overflow_y_scrollbar().p(8)
+        .child(h_flex().flex_wrap().items_start().gap(16).child(body).child(bulletin)));
   }
 }

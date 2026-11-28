@@ -1,9 +1,24 @@
 {
   "place": "right",
   "size": 340,
+  "overlay": {
+    "width": 1040,
+    "height": 820
+  },
   "title": "Orcherd",
   "palette": [
-    { "title": "Orcherd: team board", "command": "mod.open", "args": { "name": "orcherd" }, "words": "orcherd team seats tasks gates crew" },
-    { "title": "Orcherd: refresh board", "command": "orcherd.refresh", "words": "orcherd reload status" }
+    {
+      "title": "Orcherd: team board",
+      "command": "mod.open",
+      "args": {
+        "name": "orcherd"
+      },
+      "words": "orcherd team seats tasks gates crew"
+    },
+    {
+      "title": "Orcherd: refresh board",
+      "command": "orcherd.refresh",
+      "words": "orcherd reload status"
+    }
   ]
 }

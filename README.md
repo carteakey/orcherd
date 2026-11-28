@@ -154,8 +154,9 @@ orcherd mod install
 ```
 
 This adds a team board to the [Herdr desktop app](https://github.com/herdrdev/herdr-app). The board lists
-open decisions first, then seats with live status and unread counts, the latest bulletin posts, tasks by state,
-and every other team's live agents grouped by team. Click an agent to jump to its tab.
+open decisions first, then seats with live status and unread counts, tasks by state, and every other team's live
+agents grouped by team. Beside them runs a live bulletin in full markdown, with new posts marked. Click an agent to
+jump to its tab.
 Its **freeze** button (click twice) stops the whole team. It also posts a notification for each new question.
 Open it from the palette with **Orcherd: team board**.
 
