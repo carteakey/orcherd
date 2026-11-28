@@ -15,7 +15,7 @@ import { exec, spaces, focused, terminals, theme, run, checking, nextCommand, no
 const POLL_MS = 5000;
 const BULLETIN_SHOWN = 40; // newest first; the latest BULLETIN_OPEN show their full text
 const BULLETIN_OPEN = 3;
-const COLUMN_MIN = 380; // two columns when the board is at least twice this wide
+const COLUMN_MIN = 360; // each column's narrowest width
 const CONFIRM_MS = 4000; // the Freeze button arms on the first click and fires on the second
 const ICON = "mods/orcherd/icon.svg";
 const TEAM_SPACE_PREFIX = "orcherd-"; // `orcherd spawn` opens each team's seats in space `orcherd-<team id>`
@@ -438,7 +438,9 @@ export default class Orcherd extends View {
           .child(this.pill(t, `${blocked} blocked`, blocked ? t.blocked : t.dim))
           .child(this.pill(t, `${p.pending_gates.length} gates`, p.pending_gates.length ? t.working : t.dim))
           .when(Boolean(p.team.paused_at), (el) => el.child(this.pill(t, "frozen", t.blocked)))))
-      .child(div().id("board").flex_1().overflow_y_scrollbar().p(8)
-        .child(h_flex().flex_wrap().items_start().gap(16).child(body).child(bulletin)));
+      // Two columns that scroll on their own, so the bulletin stays in view beside the board.
+      .child(h_flex().flex_1().min_h(0).gap(16).px(8)
+        .child(div().id("board").flex_1().min_w(COLUMN_MIN).h_full().overflow_y_scrollbar().py(8).child(body))
+        .child(div().id("bulletin").flex_1().min_w(COLUMN_MIN).h_full().overflow_y_scrollbar().py(8).child(bulletin)));
   }
 }
