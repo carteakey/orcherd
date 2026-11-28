@@ -12,7 +12,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextView } from "gpui-base";
 import { exec, spaces, focused, terminals, theme, run, checking, nextCommand, notify, window, home } from "herdr";
 
-const POLL_MS = 5000;
+const POLL_MS = 3000;
 const BULLETIN_SHOWN = 40; // newest first; the latest BULLETIN_OPEN show their full text
 const BULLETIN_OPEN = 3;
 const COLUMN_MIN = 360; // each column's narrowest width
@@ -50,7 +50,8 @@ export default class Orcherd extends View {
     this.showDone = false;
     this.seenGates = null; // gate ids already announced; null until the first load
     this.posts = [];
-    this.openPosts = new Set(); // post ids expanded by a click
+    this.toggledPosts = new Set(); // post ids flipped from their default (newest open, older folded)
+    this.updatedAt = 0; // when the bulletin was last fetched
     this.seenPosts = null; // post ids present when the board opened; later ones are "new"
     this.armedAt = 0; // when the Freeze/Unfreeze button was armed
     this.acting = false;
@@ -139,6 +140,7 @@ export default class Orcherd extends View {
           if (b?.code === 0) {
             this.posts = (JSON.parse(b.stdout)?.data?.value ?? []).slice(-BULLETIN_SHOWN).reverse();
             this.seenPosts ??= new Set(this.posts.map((post) => post.post_id));
+            this.updatedAt = Date.now();
           }
         } else {
           const msg = (r.stderr || r.stdout).trim();
@@ -199,16 +201,17 @@ export default class Orcherd extends View {
   postRow(t, post, index) {
     const tone = post.kind === "authorized" ? t.done : post.kind === "handoff" ? t.working : t.muted;
     const isNew = this.seenPosts && !this.seenPosts.has(post.post_id);
-    const open = index < BULLETIN_OPEN || this.openPosts.has(post.post_id);
+    // Newest posts start open, older ones folded; a click flips any of them.
+    const open = (index < BULLETIN_OPEN) !== this.toggledPosts.has(post.post_id);
     const title = post.subject || post.body.split("\n")[0];
     return v_flex().id(`post-${post.post_id}`).px(8).py(6).gap(3).rounded(6)
       .hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => {
-        if (index < BULLETIN_OPEN) return;
-        this.openPosts.has(post.post_id) ? this.openPosts.delete(post.post_id) : this.openPosts.add(post.post_id);
+        this.toggledPosts.has(post.post_id) ? this.toggledPosts.delete(post.post_id) : this.toggledPosts.add(post.post_id);
         cx.notify();
       })
       .child(h_flex().gap(6).items_center().text_size(11)
+        .child(div().w(10).text_color(t.dim).child(open ? "▾" : "▸"))
         .child(div().text_color(t.foreground).font_semibold().child(post.author_seat))
         .when(post.kind !== "post", (el) => el.child(this.pill(t, post.kind, tone)))
         .when(isNew, (el) => el.child(this.pill(t, "new", t.accent)))
@@ -413,7 +416,7 @@ export default class Orcherd extends View {
     if (others) body = body.child(others);
     const fresh = this.seenPosts ? this.posts.filter((post) => !this.seenPosts.has(post.post_id)).length : 0;
     const bulletin = v_flex().gap(4).flex_1().min_w(COLUMN_MIN)
-      .child(this.section(t, "Bulletin", fresh ? `${fresh} new` : `live · ${this.posts.length}`,
+      .child(this.section(t, "Bulletin", `${fresh ? `${fresh} new · ` : ""}${this.posts.length} posts · updated ${this.updatedAt ? since(new Date(this.updatedAt).toISOString()) : "…"}`,
         this.posts.length
           ? v_flex().gap(2).children(this.posts.map((post, i) => this.postRow(t, post, i)))
           : div().px(8).text_color(t.dim).child("No posts yet.")));
