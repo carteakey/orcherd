@@ -96,20 +96,38 @@ export default class Orcherd extends View {
     }
   }
 
+  // The team in view, when the window says it outright: the focused terminal's own
+  // `orcherd.team` label (a seat), else the shown space's id (`orcherd-<team id>`). Seats
+  // live in worktrees outside the repo, so the folder alone can't tell.
+  teamInView() {
+    const f = focused();
+    const label = terminals().find((x) => x.address === f?.terminal)?.labels?.["orcherd.team"];
+    if (label) return label;
+    const space = spaces().find((x) => x.active && !x.machine);
+    return space?.id?.startsWith(TEAM_SPACE_PREFIX) ? space.id.slice(TEAM_SPACE_PREFIX.length) : null;
+  }
+
+  // What the board is showing: a team, or a folder to resolve one from.
+  viewKey() {
+    return this.teamInView() ?? this.folder();
+  }
+
   refresh(cx) {
     if (this.inflight) return;
     this.inflight = true;
     const cwd = this.folder();
+    const team = this.teamInView();
+    const key = team ?? cwd;
     cx.spawn(async (cx) => {
       try {
-        const r = await exec("orcherd", ["status", "--json"], { cwd, timeout: 10000 });
+        const r = await exec("orcherd", team ? ["--team", team, "status", "--json"] : ["status", "--json"], { cwd, timeout: 10000 });
         if (r.code === 0) {
           const receipt = JSON.parse(r.stdout);
           this.proj = receipt?.data?.value ?? null;
           // Only a team whose workspace holds this folder: with no match orcherd falls back to
           // the newest team in the store, which belongs to some other repo.
           const root = this.proj?.team?.workspace_root;
-          if (root && cwd !== root && !cwd.startsWith(root.endsWith("/") ? root : `${root}/`)) this.proj = null;
+          if (!team && root && cwd !== root && !cwd.startsWith(root.endsWith("/") ? root : `${root}/`)) this.proj = null;
           this.error = null;
           this.announce(this.proj);
           // Bulletin: a read-only op, so polling it writes no audit rows.
@@ -128,6 +146,7 @@ export default class Orcherd extends View {
         await this.nameTeams().catch(() => {});
         this.nameTeamSpaces();
         this.cwd = cwd;
+        this.key = key;
         this.loading = false;
         this.inflight = false;
       }
@@ -292,21 +311,28 @@ export default class Orcherd extends View {
     return this.section(t, exceptTeam ? "Other teams" : "Teams", groups.size, v_flex().gap(8).children(rows));
   }
 
+  refreshButton(t) {
+    return div().id("refresh").text_size(11).text_color(t.dim).hover((s) => s.text_color(t.foreground))
+      .on_click((_e, cx) => { this.refresh(cx); cx.notify(); })
+      .child(this.inflight ? "refreshing…" : "refresh");
+  }
+
   render(cx) {
     const t = theme();
     if (this.loading) return this.empty(t, "Orcherd", "Loading team board…");
+    // Follow the window: refetch when the team or folder in view changed.
+    if (this.key !== this.viewKey()) this.refresh(cx);
     if (this.error) return this.empty(t, "Orcherd unavailable", this.error);
     const p = this.proj;
     if (!p?.team) {
       const teams = this.teamsSection(t, terminals(), null);
       if (!teams) return this.empty(t, "No Orcherd team here", "Run `orcherd init --name <team> --template review-crew` in this repo.");
       return v_flex().size_full().bg(t.surface).text_size(12.5)
-        .child(div().px(12).pt(12).pb(10).border_b(1).border_color(t.border).text_color(t.muted)
-          .child("No Orcherd team in this folder."))
+        .child(h_flex().px(12).pt(12).pb(10).gap(8).items_center().border_b(1).border_color(t.border)
+          .child(div().flex_1().text_color(t.muted).child("No Orcherd team in this folder."))
+          .child(this.refreshButton(t)))
         .child(div().id("board").flex_1().overflow_y_scrollbar().p(8).child(teams));
     }
-    // Follow the shown space: refetch when it moved to another folder.
-    if (this.cwd !== this.folder()) this.refresh(cx);
 
     const all = terminals();
     const seatsById = new Map(p.seats.map((s) => [s.seat_id, s]));
@@ -374,8 +400,7 @@ export default class Orcherd extends View {
             .child(this.acting ? "…" : Date.now() - this.armedAt <= CONFIRM_MS
               ? (p.team.paused_at ? "click to unfreeze" : "click to freeze all")
               : (p.team.paused_at ? "unfreeze" : "freeze")))
-          .child(div().id("refresh").text_size(11).text_color(t.dim).hover((s) => s.text_color(t.foreground))
-            .on_click((_e, cx) => this.refresh(cx)).child("refresh")))
+          .child(this.refreshButton(t)))
         .when(Boolean(p.team.goal), (el) => el.child(div().text_size(11.5).text_color(t.muted).child(p.team.goal)))
         .child(h_flex().gap(6)
           .child(this.pill(t, `${working} working`, working ? t.working : t.dim))
