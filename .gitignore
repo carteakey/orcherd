@@ -1,3 +1,7 @@
 /target/
 **/*.rs.bk
 .DS_Store
+
+# Editor hints written by `herdr-app check`
+mods/orcherd/gpui-kit.d.ts
+mods/orcherd/jsconfig.json

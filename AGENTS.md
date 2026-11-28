@@ -7,6 +7,7 @@ Engineering guidance for agents working in the `orcherd` repository. Read this a
 - **Keep `orcherd` zero-GUI and fast to build.** Never add GPUI, `gix`, or heavy UI/HTTP dependencies to workspace crates. `orcherd` talks exclusively to SQLite (`rusqlite`) and `herdr-core` (`hc`) over its framed JSON-RPC socket (`crates/orcherd-hc`).
 - **Never modify Herdr or `herdr-core`.** `orcherd` is a client of `herdr-core`'s public socket and CLI contract.
 - **Keep skills and CLI in lockstep.** `skills/orcherd/GUIDE.md` and `skills/orcherd/references/*.md` are compiled into `orcherd-cli` and served by `orcherd skills get`. Update the bundled skill whenever a command, flag, or receipt changes.
+- **The Herdr board mod is code too.** `mods/orcherd/` is embedded in the binary by `orcherd mod install`. Run `herdr-app check mods/orcherd` after every change, use only Herdr's public mod API and commands, and never clone or edit Herdr's shipped mods or layouts.
 - **File size ceiling: 1,000 lines.** Split modules by responsibility before crossing 1,000 lines.
 - **Typed errors everywhere.** Each crate defines `pub use error::{Error, Result}` using `thiserror`. Never use `Result<T, String>` or `unwrap()` / `expect()` outside tests.
 

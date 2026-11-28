@@ -18,7 +18,7 @@
 
 ---
 
-orcherd is one Rust binary (~7 MB) with a SQLite store. Agents call it from their terminals:
+orcherd is one Rust binary (~8 MB) with a SQLite store. Agents call it from their terminals:
 workers read their brief with `orcherd inbox`, ask with `orcherd ask`, and hand in with
 `orcherd done`. Reviewers rule with `orcherd verdict`. The supervisor plans tasks and answers
 questions. Each call is one transaction, so the team's state survives crashes, restarts, and
@@ -50,6 +50,8 @@ orcherd skills install                                     # teaches your agents
 ```
 
 You need [herdr-core](https://herdr.dev/) (`hc`) on your `PATH`: orcherd starts every agent in an `hc` terminal.
+Reinstalling while teams run is safe: the daemon switches to the new binary by itself, and the store migrates on first
+open. A binary older than the store refuses it rather than touching it, so update every machine together.
 
 ```sh
 # In your repo: a supervisor, two builders, two reviewers
@@ -145,7 +147,12 @@ orcherd tunnel m1                                  # forwards orcherd's socket t
 orcherd spawn --seat m1-builder --on m1 --spec-file brief.md
 ```
 
-Commands the remote seat runs reach your store through the tunnel and are logged as `m1/<terminal>`. The daemon watches recorded tunnels and restarts them with backoff if SSH drops (escalating after repeated failures) until you run `orcherd tunnel m1 --stop`. `orcherd init` always creates teams in the local store (never through a tunnel), local seats inherit a custom `ORCHERD_STATE_DIR`, and tunneled `team not found` errors name the remote host and tunnel socket.
+Commands the remote seat runs reach your store through the tunnel and are logged as `m1/<terminal>`.
+
+- The daemon restarts a dropped tunnel with backoff and reports a machine that stays down. `orcherd tunnel m1 --stop` ends it for good.
+- `orcherd init` always creates the team in the local store, never through a tunnel.
+- Seats inherit a custom `ORCHERD_STATE_DIR`. A `team not found` error names the host it asked and any local store that has the team.
+- `orcherd preflight --agent agy` shows when `hc` terminals and your shell would run different agent binaries.
 
 ## Herdr app board
 

@@ -81,3 +81,25 @@ When distilling `skills/herdr-team/SKILL.md` and `herdr-supervisor/SKILL.md` int
 - Manual `HERDR_PANE_ID=... /abs/path/herding team register` re-registration rituals after every UI restart.
 - `ss -xlp | grep gpui/control.sock` socket collision debugging.
 - Polling `herdr pane read` in 15-minute cron sweeps.
+
+---
+
+## 5. What the First Field Runs Taught (2026-11-26 to 2026-11-28)
+
+orcherd ran a real production team (`lvl2` on `k-squared`) and then fixed its own bugs with a team of agents (`orcherd-bugs`: three builders and a blind reviewer, every fix reviewed before landing). These are the failures that changed the design.
+
+| Field finding | Root cause | What orcherd does now |
+| --- | --- | --- |
+| **The doorbell fix shipped, but the team was rung by hand for hours** | The daemon was started a minute before the new binary landed and kept running the old inode. | **The daemon re-executes itself** when its binary changes (same pid, so the lock stays valid). A deploy is picked up within about 10 s. |
+| **Builders silently started from 8-commit-old code** | Local `main` had gone stale while work was pushed from another branch, and `new-child` used the local ref. | **Upstream-aware worktrees**: the base branch's upstream is fetched (bounded, non-fatal), and a newer upstream wins. Divergence is a warning in the receipt. |
+| **Every new agy seat stalled at "Trust this folder?"** | agy trusts exact paths, so a trusted repo doesn't cover its worktrees. | **Inherited trust**: a worktree is added to agy's `trustedWorkspaces` only when its repo is already trusted. It never trusts anything new on its own. |
+| **Remote agents lost the team: "the tunnel is down"** | A dead `ssh -R` ended correctly, but nothing restarted it. | **Supervised tunnels**: recorded tunnels are restarted with backoff, and a machine that stays down escalates once. |
+| **Seats on m1 failed with `team not found`** | A supervisor ran its team in a custom `ORCHERD_STATE_DIR`, which spawn didn't pass to seats, so their commands fell through to the tunnel. | **Seats inherit the store**, `init` never tunnels, and `team not found` names the route it took and the sibling store that holds the team. |
+| **False alarms: "blocked on auth" at startup, the supervisor escalated to itself, two escalations per block** | hc reports agy `blocked` while its token source loads; escalations didn't check the role; two write paths. | **Startup grace** (15 s from the daemon's first sighting), no self-escalation, and one block gives one escalation. |
+| **A crossed `done` reopened a finished task** | Turn outcomes didn't check the task's state. | **Finished tasks refuse `done`/`verdict`/`ask`**. Owner rounds use `task reopen`, which keeps the review-round count. |
+| **Reusing a seat moved it into the shared checkout** | `spawn` without `--worktree` resolved `current` and overwrote the seat's worktree. | **A seat keeps its worktree** unless `--worktree` is passed. |
+| **Supervisors learned about FIX verdicts late** | Only PASS was copied to the supervisor. | **Every verdict reaches the supervisor.** |
+| **A read-only audit found 10 real bugs at the seams** | The fixes interacted: replays collided across teams, the daemon never reconnected to hc, freeze had holes, and blindness could be bypassed on unassigned tasks. | **All fixed**, and the store moved to schema v3 (per-team receipts). A periodic findings-only bug hunt by one seat paid for itself. |
+
+Two process lessons for supervisors: **update local `main` after every landing** (fixed in code, but still good hygiene), and **give the reviewer context on stale bases and size**. Workers rebase late and over-test, so a reviewer told what to look for converges in one round instead of three.
+
