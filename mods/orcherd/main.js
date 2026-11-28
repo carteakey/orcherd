@@ -16,6 +16,7 @@ const POLL_MS = 5000;
 const BULLETIN_SHOWN = 6;
 const CONFIRM_MS = 4000; // the Freeze button arms on the first click and fires on the second
 const ICON = "mods/orcherd/icon.svg";
+const TEAM_SPACE_PREFIX = "orcherd-"; // `orcherd spawn` opens each team's seats in space `orcherd-<team id>`
 
 // Most urgent first; completed work folds into a count at the end.
 const TASK_ORDER = ["blocked", "review", "in_progress", "assigned", "ready", "pending", "failed"];
@@ -85,6 +86,16 @@ export default class Orcherd extends View {
     }
   }
 
+  // Each team's seats share a space; Herdr names an unnamed space after its repo, so name it
+  // after the team instead. Once named (by us or by hand), Herdr keeps the name.
+  nameTeamSpaces() {
+    for (const s of spaces()) {
+      if (s.machine || s.named || !s.id.startsWith(TEAM_SPACE_PREFIX)) continue;
+      const name = this.teamNames.get(s.id.slice(TEAM_SPACE_PREFIX.length));
+      if (name) run("space.rename", { id: s.id, name });
+    }
+  }
+
   refresh(cx) {
     if (this.inflight) return;
     this.inflight = true;
@@ -115,6 +126,7 @@ export default class Orcherd extends View {
         this.error = `orcherd is not runnable: ${e?.message ?? e}`;
       } finally {
         await this.nameTeams().catch(() => {});
+        this.nameTeamSpaces();
         this.cwd = cwd;
         this.loading = false;
         this.inflight = false;

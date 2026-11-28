@@ -159,7 +159,8 @@ and every other team's live agents grouped by team. Click an agent to jump to it
 Its **freeze** button (click twice) stops the whole team. It also posts a notification for each new question.
 Open it from the palette with **Orcherd: team board**.
 
-Seats you spawn from a Herdr terminal open as their own tabs in that space (`--no-ui` keeps one headless).
+Each team gets its own Herdr space, and the seats you spawn open there as tabs (`--no-ui` keeps one headless). Switch Herdr's Agents list to
+**Grouped by space** to see your agents grouped by team.
 
 ## Commands
 

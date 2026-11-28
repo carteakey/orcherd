@@ -352,7 +352,7 @@ pub(crate) fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32,
                     labels.insert("orcherd.seat", seat_name_cloned.as_str());
                     labels.insert("orcherd.role", seat_role_str.as_str());
                     let space = (!no_ui)
-                        .then(|| herdr_space::inherited_space(&core, &store, &team.team_id, machine.as_deref()))
+                        .then(|| herdr_space::team_space(&team.team_id, machine.as_deref()))
                         .flatten();
                     if let Some(ref space) = space {
                         labels.insert(herdr_space::SPACE_LABEL, space.as_str());
