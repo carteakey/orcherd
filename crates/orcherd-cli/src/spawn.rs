@@ -83,7 +83,7 @@ pub(crate) fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32,
     let mut model = None;
     let mut account = None;
     let mut effort = None;
-    let mut worktree_arg = "current".to_owned();
+    let mut worktree_arg = None;
     let mut base_branch = None;
     let mut machine = None;
     let mut task_id = None;
@@ -126,7 +126,7 @@ pub(crate) fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32,
             }
             "--worktree" => {
                 i += 1;
-                worktree_arg = req_val(args, i, "--worktree")?.to_owned();
+                worktree_arg = Some(req_val(args, i, "--worktree")?.to_owned());
             }
             "--base-branch" => {
                 i += 1;
@@ -196,15 +196,23 @@ pub(crate) fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32,
         .map_err(|e| annotate_team_not_found(e.to_string(), &state_dir))?;
     let project_cfg = worktree::load_project_config(Path::new(&team.workspace_root))?;
 
-    let wt_spec = WorktreeSpec::parse(&worktree_arg, Some(&seat_name))?;
-    let prepared_wt = worktree::prepare(
-        Path::new(&team.workspace_root),
-        &wt_spec,
-        &seat_name,
-        base_branch.as_deref(),
-        &team.bootstrap_symlinks,
-        &team.bootstrap_copies,
-    )?;
+    // Prepare a worktree only when `--worktree` was passed explicitly; omitting it lets
+    // `SpawnPrepare` keep an existing seat's recorded `worktree_path` (defaulting new seats to `current`).
+    let prepared_wt = match worktree_arg.as_deref() {
+        Some(raw) => {
+            let wt_spec = WorktreeSpec::parse(raw, Some(&seat_name))?;
+            let prepared = worktree::prepare(
+                Path::new(&team.workspace_root),
+                &wt_spec,
+                &seat_name,
+                base_branch.as_deref(),
+                &team.bootstrap_symlinks,
+                &team.bootstrap_copies,
+            )?;
+            Some((wt_spec, prepared))
+        }
+        None => None,
+    };
 
     let actor = resolve_actor(Some(&store), Some(&team.team_id), global.act_as.as_deref());
 
@@ -260,8 +268,10 @@ pub(crate) fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32,
         model: model.clone(),
         account,
         effort,
-        worktree_path: Some(prepared_wt.path.display().to_string()),
-        branch: prepared_wt.branch.clone(),
+        worktree_path: prepared_wt
+            .as_ref()
+            .map(|(_, wt)| wt.path.display().to_string()),
+        branch: prepared_wt.as_ref().and_then(|(_, wt)| wt.branch.clone()),
         machine: machine.clone(),
         task_id,
         spec: resolved_spec,
@@ -293,6 +303,12 @@ pub(crate) fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32,
         let seat_model_cloned = seat.model.clone();
         let seat_role_str = seat.role.to_string();
         let seat_keep_open = seat.keep_open;
+        let launch_cwd = prepared_wt
+            .as_ref()
+            .map(|(_, wt)| wt.path.display().to_string())
+            .or_else(|| seat.worktree_path.clone())
+            .unwrap_or_else(|| team.workspace_root.clone());
+        let prepared_branch = prepared_wt.as_ref().and_then(|(_, wt)| wt.branch.clone());
         let seat_bound_now = spawn_replay::seat_is_bound(&store, &team.team_id, &seat_name_cloned);
 
         if let Some(term) = explicit_terminal {
@@ -307,8 +323,8 @@ pub(crate) fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32,
                                 machine,
                                 terminal: term,
                             },
-                            worktree_path: Some(prepared_wt.path.display().to_string()),
-                            branch: prepared_wt.branch,
+                            worktree_path: Some(launch_cwd),
+                            branch: prepared_branch,
                             resume_session,
                         })
                         .with_team(&team.team_id),
@@ -358,19 +374,24 @@ pub(crate) fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32,
                         labels.insert(herdr_space::SPACE_LABEL, space.as_str());
                     }
 
-                    trust_note = agy_trust::maybe_inherit_worktree_trust(
-                        &seat_agent_cloned, &wt_spec, Path::new(&team.workspace_root), &prepared_wt.path, machine.as_deref(),
-                    );
+                    trust_note = prepared_wt.as_ref().and_then(|(wt_spec, wt)| {
+                        agy_trust::maybe_inherit_worktree_trust(
+                            &seat_agent_cloned,
+                            wt_spec,
+                            Path::new(&team.workspace_root),
+                            &wt.path,
+                            machine.as_deref(),
+                        )
+                    });
                     let argv = agent_argv::build_agent_argv(
                         &seat_agent_cloned,
                         seat_model_cloned.as_deref(),
                         resume_session.as_deref(),
                         &project_cfg.agents,
                     );
-                    let cwd_str = prepared_wt.path.display().to_string();
                     let run_req = Run {
                         argv: &argv,
-                        cwd: Some(&cwd_str),
+                        cwd: Some(&launch_cwd),
                         env: env_map,
                         keep: seat_keep_open,
                         labels,
@@ -414,8 +435,8 @@ pub(crate) fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32,
                                             machine,
                                             terminal: terminal.address.clone(),
                                         },
-                                        worktree_path: Some(cwd_str),
-                                        branch: prepared_wt.branch,
+                                        worktree_path: Some(launch_cwd),
+                                        branch: prepared_branch,
                                         resume_session,
                                     })
                                     .with_team(&team.team_id),
@@ -478,7 +499,7 @@ pub(crate) fn handle_spawn(args: &[String], global: &GlobalFlags) -> Result<i32,
         *r_seat = updated_seat;
     }
     agy_trust::append_note(&mut receipt, trust_note);
-    if let Some(warning) = prepared_wt.warning {
+    if let Some(warning) = prepared_wt.and_then(|(_, wt)| wt.warning) {
         receipt.next = Some(match receipt.next.take() {
             Some(existing) if !existing.trim().is_empty() => format!("{warning}. {existing}"),
             _ => warning,

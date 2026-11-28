@@ -9,6 +9,8 @@ Choose `--worktree` based on file ownership and isolation needs:
 - **`--worktree new-top-level`**: Creates a sibling worktree outside the parent workspace hierarchy.
 - **`--worktree path:<dir>`**: Runs inside an existing worktree path (for example, pointing a blind `gauntlet` reviewer at `builder-a`'s child worktree so it can inspect built artifacts read-only).
 
+Omitting `--worktree` keeps an existing seat's recorded `worktree_path` on both warm reuse and cold relaunch; `current` applies only to a new seat or when passed explicitly.
+
 ### Bootstrap symlinks for fresh worktrees
 
 Git worktrees do not carry git-ignored files (`.env`, `.venv`, `node_modules`, local media caches). When `orcherd spawn` creates a `new-child` or `new-top-level` worktree, it reads `bootstrap_symlinks` from `.orcherd.toml` (or the team record) and symlinks each listed relative path from the root checkout into the new worktree before starting the agent terminal. For local Antigravity (`agy`) seats in `new-child`/`new-top-level` worktrees, `orcherd` also inherits `trustedWorkspaces` from `workspace_root` in `~/.gemini/antigravity-cli/settings.json` when the parent repo is already trusted (leaving untrusted roots and remote seats untouched with a `next` note).

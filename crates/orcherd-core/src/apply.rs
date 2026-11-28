@@ -326,6 +326,14 @@ fn exec_spawn_prepare(conn: &Connection, team_id: &str, actor: &Actor, now: &str
 
     let existing_seat = resolve_seat(conn, team_id, clean_name).ok();
     let warm_reuse = existing_seat.as_ref().is_some_and(|s| s.address.is_bound() && resume_session.is_none());
+    let default_wt: Option<String> = conn
+        .query_row(
+            "SELECT workspace_root FROM teams WHERE team_id = ?1",
+            params![team_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .filter(|root| !root.trim().is_empty());
 
     let seat_record = if let Some(existing) = existing_seat {
         let new_role = role.unwrap_or(existing.role);
@@ -333,7 +341,7 @@ fn exec_spawn_prepare(conn: &Connection, team_id: &str, actor: &Actor, now: &str
         let new_model = model.or(existing.model);
         let new_account = account.or(existing.account);
         let new_effort = effort.or(existing.effort);
-        let new_wt = worktree_path.clone().or(existing.worktree_path);
+        let new_wt = worktree_path.clone().or(existing.worktree_path).or(default_wt);
         let new_branch = branch.clone().or(existing.branch);
         let new_keep_open = keep_open.unwrap_or(existing.keep_open);
         let new_resume = resume_session.or(existing.resume_session);
@@ -348,9 +356,10 @@ fn exec_spawn_prepare(conn: &Connection, team_id: &str, actor: &Actor, now: &str
         let r = role.unwrap_or(SeatRole::Worker);
         let ag = agent.unwrap_or_else(|| "antigravity".to_string());
         let ko = keep_open.unwrap_or(true);
+        let new_wt = worktree_path.clone().or(default_wt);
         conn.execute(
             "INSERT INTO seats (team_id, seat_id, name, role, agent, model, account, effort, address_kind, worktree_path, branch, keep_open, resume_session, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'none', ?9, ?10, ?11, ?12, ?13, ?13)",
-            params![team_id, seat_id, clean_name, r.as_str(), ag, model, account, effort, worktree_path, branch, i64::from(ko), resume_session, now],
+            params![team_id, seat_id, clean_name, r.as_str(), ag, model, account, effort, new_wt, branch, i64::from(ko), resume_session, now],
         )?;
         conn.execute("INSERT OR IGNORE INTO doorbell (team_id, seat_id, rung_through_seq, attempts) VALUES (?1, ?2, 0, 0)", params![team_id, seat_id])?;
         resolve_seat(conn, team_id, &seat_id)?
